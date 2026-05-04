@@ -52,14 +52,14 @@ trackable side-by-side. Sibling reference: `rust-workspace/lib-seed-core/tasks.m
 - [x] `T3.7` `SeedRunner.prune` body — orphaned tracking removal (§10.6)
 
 #### T4 — `@servicecute/firestore-seed` adapter bodies
-- [ ] `T4.1` `FirestoreTracking.upsert` — `__seeds/{name}` set with merge=false (§10.2)
-- [ ] `T4.2` `FirestoreTracking.get` / `remove` / `list` — list filters via `_kind` discriminator
-- [ ] `T4.3` `FirestoreLock.acquire` via `runTransaction` with create-precondition (§10.5)
-- [ ] `T4.4` `FirestoreLock.heartbeat` / `release` / `current` / `forceUnlock`
-- [ ] `T4.5` `FirestoreBackend.upsertBatch` — 500-op chunks, per-chunk transactional, cross-chunk reverse-delete on failure (§8.3)
-- [ ] `T4.6` `FirestoreBackend.deletePaths` per-path delete; pre-read for missing detection
-- [ ] `T4.7` Ref-existence check via `recordExists` (§7.1)
-- [ ] `T4.8` Declared UNIQUE pre-check via `findUniqueConflicts` (§13.4)
+- [x] `T4.1` `FirestoreTracking.upsert` — `__seeds/{name}` set with merge=false (§10.2)
+- [x] `T4.2` `FirestoreTracking.get` / `remove` / `list` — list filters via `_kind` discriminator
+- [x] `T4.3` `FirestoreLock.acquire` via `runTransaction` with create-precondition (§10.5)
+- [x] `T4.4` `FirestoreLock.heartbeat` / `release` / `current` / `forceUnlock`
+- [x] `T4.5` `FirestoreBackend.upsertBatch` — 500-op chunks, per-chunk transactional, cross-chunk reverse-delete on failure (§8.3)
+- [x] `T4.6` `FirestoreBackend.deletePaths` per-path delete; pre-read for missing detection
+- [x] `T4.7` Ref-existence check via `recordExists` (§7.1)
+- [x] `T4.8` Declared UNIQUE pre-check via `findUniqueConflicts` (§13.4)
 
 #### T5 — CLI surface
 - [ ] `T5.1` Either commander/clipanion wrapper or commander-free dispatch — runner already exposes the typed `SeedCommand` union
@@ -159,6 +159,7 @@ trackable side-by-side. Sibling reference: `rust-workspace/lib-seed-core/tasks.m
 | T1.5–T1.9, T1.11, T1.12 | P0 | claude | 2026-05-04 | T1.10 | completed |
 | T2.1–T2.8 | P0 | claude | 2026-05-04 | T1 | completed |
 | T3.1–T3.7 | P1 | claude | 2026-05-04 | T2 | completed |
+| T4.1–T4.8 | P1 | claude | 2026-05-04 | T1 | completed |
 
 ## History
 
