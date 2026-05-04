@@ -21,14 +21,14 @@ trackable side-by-side. Sibling reference: `rust-workspace/lib-seed-core/tasks.m
 - [x] `T1.2` `SurrealTracking.get`
 - [x] `T1.3` `SurrealTracking.remove`
 - [x] `T1.4` `SurrealTracking.list` ordered by name
-- [ ] `T1.5` `SurrealLock.acquire` with race-window verification + steal-on-expired (§10.5)
-- [ ] `T1.6` `SurrealLock.heartbeat`
-- [ ] `T1.7` `SurrealLock.release` (idempotent against force-unlock)
-- [ ] `T1.8` `SurrealLock.current`
-- [ ] `T1.9` `SurrealLock.forceUnlock`
+- [x] `T1.5` `SurrealLock.acquire` with race-window verification + steal-on-expired (§10.5)
+- [x] `T1.6` `SurrealLock.heartbeat`
+- [x] `T1.7` `SurrealLock.release` (idempotent against force-unlock)
+- [x] `T1.8` `SurrealLock.current`
+- [x] `T1.9` `SurrealLock.forceUnlock`
 - [x] `T1.10` `SurrealLock.setup` runs the LOCK_DDL
-- [ ] `T1.11` `SurrealBackend.upsertBatch` — BEGIN/COMMIT TRANSACTION script with parameterised UPSERTs
-- [ ] `T1.12` `SurrealBackend.deletePaths` returns `DeleteResult { deleted, missing }`; FK rejection → `E_RESET_FK_HELD`
+- [x] `T1.11` `SurrealBackend.upsertBatch` — BEGIN/COMMIT TRANSACTION script with parameterised UPSERTs
+- [x] `T1.12` `SurrealBackend.deletePaths` returns `DeleteResult { deleted, missing }`; FK rejection → `E_RESET_FK_HELD`
 
 #### T2 — `@servicecute/seed-core` runner orchestration
 - [ ] `T2.1` `topologicalOrder` body (already drafted) — verify alphabetical tiebreak per §13.6 + cycle detection
@@ -156,7 +156,8 @@ trackable side-by-side. Sibling reference: `rust-workspace/lib-seed-core/tasks.m
 | task_id | priority | owner | target_date | dependencies | status |
 |---------|----------|-------|-------------|--------------|--------|
 | T1.1–T1.4, T1.10 | P0 | claude | 2026-05-04 | none | completed |
-| T1.5–T1.9 | P0 | claude | 2026-05-04 | T1.10 | in_progress |
+| T1.5–T1.9, T1.11, T1.12 | P0 | claude | 2026-05-04 | T1.10 | completed |
+| T2.1–T2.8 | P0 | claude | 2026-05-04 | T1 | in_progress |
 
 ## History
 
