@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.base.json",
+  "files": [],
+  "references": [
+    { "path": "./packages/seed-core" },
+    { "path": "./packages/surrealdb-seed" },
+    { "path": "./packages/firestore-seed" }
+  ]
+}

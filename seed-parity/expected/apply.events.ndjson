@@ -1,0 +1,4 @@
+{"ts":"<ts>","level":"info","event":"runner.starting","data":{"verb":"apply","args":[],"format":"json","backend":"<surrealdb|firestore>","scope_target":"development","force":false}}
+{"ts":"<ts>","level":"info","event":"seed.applying","seed":"baseline-countries","data":{"path_count":0,"dependsOn":[]}}
+{"ts":"<ts>","level":"info","event":"seed.applied","seed":"baseline-countries","data":{"record_count":3,"paths_touched":["<3 entries lex-sorted>"],"duration_ms":"<u64>"}}
+{"ts":"<ts>","level":"info","event":"runner.completed","data":{"verb":"apply","duration_ms":"<u64>","applied_count":1,"skipped_count":0,"error_count":0}}

@@ -1,0 +1,24 @@
+{
+  "_comment": "Expected Firestore state after `seed apply --all` from an empty DB. Spec §21.",
+  "countries": {
+    "US": { "iso": "US", "name": "United States" },
+    "GB": { "iso": "GB", "name": "United Kingdom" },
+    "JP": { "iso": "JP", "name": "Japan" }
+  },
+  "__seeds": {
+    "baseline-countries": {
+      "_kind": "tracking",
+      "name": "baseline-countries",
+      "applied_at": "<runner-fills-ts-ms>",
+      "key_hash": "sha256:<from-runner>",
+      "scope": ["development"],
+      "paths_touched": [
+        "countries/GB",
+        "countries/JP",
+        "countries/US"
+      ],
+      "spec_version": "0.4.0",
+      "tracking_schema_version": "1"
+    }
+  }
+}

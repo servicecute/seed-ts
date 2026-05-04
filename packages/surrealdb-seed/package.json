@@ -1,0 +1,20 @@
+{
+  "name": "@servicecute/surrealdb-seed",
+  "version": "0.1.0",
+  "description": "SurrealDB adapter for the seed runner — TypeScript implementation of registry/seed-spec/seed-spec.md v0.4.1.",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": ["src", "README.md"],
+  "scripts": {
+    "build": "bun --bun tsc -b",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@servicecute/seed-core": "workspace:^",
+    "surrealdb": "^2.0.0"
+  }
+}

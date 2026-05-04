@@ -1,0 +1,196 @@
+# seed-ts — Tasks
+
+TypeScript implementation of the seed-spec
+(`registry/seed-spec/seed-spec.md` v0.4.1). Mirrors the Rust workspace's
+`lib-seed-core/tasks.md` task ID scheme so cross-language work is
+trackable side-by-side. Sibling reference: `rust-workspace/lib-seed-core/tasks.md`.
+
+## Metadata
+- **Last updated**: 2026-05-04
+- **Active milestone**: v0.4.1 spec parity — `@servicecute/seed-core` orchestration first, then SurrealDB adapter, then Firestore mirror
+- **Spec version**: 0.4.1
+- **Bun version**: ≥ 1.1
+- **Node compatibility**: ≥ 20 (npm-friendly)
+
+## Active Tasks
+
+### P0 — Blockers
+
+#### T1 — `@servicecute/surrealdb-seed` adapter bodies
+- [ ] `T1.1` `SurrealTracking.upsert` — UPSERT into `__seeds` (§10.1)
+- [ ] `T1.2` `SurrealTracking.get`
+- [ ] `T1.3` `SurrealTracking.remove`
+- [ ] `T1.4` `SurrealTracking.list` ordered by name
+- [ ] `T1.5` `SurrealLock.acquire` with race-window verification + steal-on-expired (§10.5)
+- [ ] `T1.6` `SurrealLock.heartbeat`
+- [ ] `T1.7` `SurrealLock.release` (idempotent against force-unlock)
+- [ ] `T1.8` `SurrealLock.current`
+- [ ] `T1.9` `SurrealLock.forceUnlock`
+- [ ] `T1.10` `SurrealLock.setup` runs the LOCK_DDL
+- [ ] `T1.11` `SurrealBackend.upsertBatch` — BEGIN/COMMIT TRANSACTION script with parameterised UPSERTs
+- [ ] `T1.12` `SurrealBackend.deletePaths` returns `DeleteResult { deleted, missing }`; FK rejection → `E_RESET_FK_HELD`
+
+#### T2 — `@servicecute/seed-core` runner orchestration
+- [ ] `T2.1` `topologicalOrder` body (already drafted) — verify alphabetical tiebreak per §13.6 + cycle detection
+- [ ] `T2.2` `hashCanonical` (already drafted) — verify it strips comments + collapses whitespace per §19.3
+- [ ] `T2.3` Drift detection (`checkDrift` already drafted) — wire into apply path
+- [ ] `T2.4` Scope gate (`checkScope`/`rejectProductionScope` already drafted) — wire into apply path
+- [ ] `T2.5` Lock orchestration with heartbeat task using `setInterval` + `clearInterval` (TS equivalent of the Rust tokio-spawn pattern)
+- [ ] `T2.6` Parse-time reference validation pass
+- [ ] `T2.7` `SeedRunner.apply` body
+- [ ] `T2.8` `runner.starting` / `completed` / `failed` events
+
+### P1 — Must-have for v0.4.1 conformance
+
+#### T3 — Reset / status / list / validate / prune / force-unlock / export-registry
+- [ ] `T3.1` `SeedRunner.reset` body with RESTRICT default (§13.2)
+- [ ] `T3.2` `--cascade` reverse-topological reset
+- [ ] `T3.3` `SeedRunner.status` body
+- [ ] `T3.4` `SeedRunner.list` body
+- [ ] `T3.5` `SeedRunner.validate` body
+- [ ] `T3.6` `SeedRunner.forceUnlock` wired to `Lock.forceUnlock`
+- [ ] `T3.7` `SeedRunner.prune` body — orphaned tracking removal (§10.6)
+
+#### T4 — `@servicecute/firestore-seed` adapter bodies
+- [ ] `T4.1` `FirestoreTracking.upsert` — `__seeds/{name}` set with merge=false (§10.2)
+- [ ] `T4.2` `FirestoreTracking.get` / `remove` / `list` — list filters via `_kind` discriminator
+- [ ] `T4.3` `FirestoreLock.acquire` via `runTransaction` with create-precondition (§10.5)
+- [ ] `T4.4` `FirestoreLock.heartbeat` / `release` / `current` / `forceUnlock`
+- [ ] `T4.5` `FirestoreBackend.upsertBatch` — 500-op chunks, per-chunk transactional, cross-chunk reverse-delete on failure (§8.3)
+- [ ] `T4.6` `FirestoreBackend.deletePaths` per-path delete; pre-read for missing detection
+- [ ] `T4.7` Ref-existence check via `recordExists` (§7.1)
+- [ ] `T4.8` Declared UNIQUE pre-check via `findUniqueConflicts` (§13.4)
+
+#### T5 — CLI surface
+- [ ] `T5.1` Either commander/clipanion wrapper or commander-free dispatch — runner already exposes the typed `SeedCommand` union
+- [ ] `T5.2` Flag parsing: `--sudo`/`--yes`/`--force`/`--all`/`--cascade`/`--dry-run`/`--format=text|json`
+- [ ] `T5.3` Exit-code mapping (`exitCodeFor` already drafted)
+- [ ] `T5.4` Text formatter (already drafted as `TextEmitter`); confirm formatting matches Rust's per spec parity rules
+- [ ] `T5.5` `process.stdout.isTTY` — already wired in `TextEmitter`
+
+#### T6 — Schema registry features
+- [ ] `T6.1` `registryToJson` / `registryFromJson` round-trip (already drafted)
+- [ ] `T6.2` JSON Schema 2020-12 validation at upsert via `ajv/dist/2020` (already drafted as `validateRecord`); wire into apply loop
+- [ ] `T6.3` `requiresSchemas` version-equality at parse time → `E_SCHEMA_VERSION_MISMATCH`
+- [ ] `T6.4` `seed export-registry` verb body
+- [ ] `T6.5` `BackendMetadata` interface (already in `schema.ts`)
+- [ ] `T6.6` Zod-derived registration helper (TS analog of Rust's `schema_for_surreal`/`schema_for_firestore`)
+
+#### T7 — Transformer machinery
+- [ ] `T7.1` Marker walker (already drafted as `resolveMarkers`)
+- [ ] `T7.2` `requires` parse-time validation — wire into runner
+- [ ] `T7.3` Bounded-concurrency evaluator (default 8) — `p-limit` or hand-rolled
+- [ ] `T7.4` `seed.transformer.applied` event MUST omit input/output values
+- [ ] `T7.5` Transformer error → `E_TRANSFORMER_FAILED`
+
+#### T8 — Lock heartbeat task
+- [ ] `T8.1` `setInterval`-based heartbeat at `ttlMs/3`; clear on release
+- [ ] `T8.2` Steal-on-expired logged via NDJSON
+- [ ] `T8.3` `regenerate` uses `LockVerb='regenerate'`
+
+#### T9 — Reset / tracking advanced
+- [ ] `T9.1` `pathsTouched` lex-sorted on write enforced in core (single source)
+- [ ] `T9.2` `trackingSchemaVersion` forward-compat: missing field → "1"
+- [ ] `T9.3` Cross-seed ownership transfer + `seed.overwriting_owned` warn (§8.2)
+- [ ] `T9.4` Reset interactive confirmation (already drafted in `commands.ts`)
+- [ ] `T9.5` `seed.reset.path_missing` warn (non-fatal)
+
+#### T10 — Parity tests (§21)
+- [ ] `T10.1` `seed-parity/` skeleton + fixtures (DONE — copied from rust-workspace/seed-parity/)
+- [ ] `T10.2` SurrealDB parity test (`packages/surrealdb-seed/test/parity.test.ts`); env-tuned via `SURREAL_PARITY_URL`; `bun test --filter` excludes by default unless `PARITY=1`
+- [ ] `T10.3` Firestore parity test (`packages/firestore-seed/test/parity.test.ts`); env-tuned via `FIRESTORE_EMULATOR_HOST`
+- [ ] `T10.4` NDJSON event-shape diff (already drafted as `compareEventShapes` + `parseNdjson`)
+- [ ] `T10.5` `hashCanonical` self-consistency test in `packages/seed-core/test/`
+
+#### T11 — Steering & integration plumbing
+- [ ] `T11.1` Add `.kiro/steering/seed-ts.md` (TS-side mirror of `lib-seed.md`)
+- [ ] `T11.2` First consumer wire-in (waiting on user direction — likely an existing elysia backend)
+- [ ] `T11.3` Bump `Implementation scoreboard` in spec §24 once parity passes
+- [ ] `T11.4` Initial commit + new GitHub repo (DONE — see History)
+
+### P2 — Post-MVP / Near-term
+
+#### T12 — Generator + cache pipeline (§17)
+- [ ] `T12.1` Hard-timeout enforcement via `AbortController` → `E_GENERATOR_TIMEOUT`
+- [ ] `T12.2` Cost cap pre-flight → `E_GENERATOR_BUDGET_EXCEEDED`
+- [ ] `T12.3` Validation threshold (default 0.20)
+- [ ] `T12.4` Cache file writer with canonical formatting (§17.3)
+- [ ] `T12.5` Cache file reader / `loadGenerated`
+- [ ] `T12.6` Cache staleness on schema bump
+- [ ] `T12.7` `prompt_hash` change detection
+- [ ] `T12.8` `seed regenerate` verb body
+- [ ] `T12.9` Generator events catalog
+- [ ] `T12.10` `PricingRegistry.estimate` wired into LLM pricing path
+
+#### T13 — Runner-context API (§11.6)
+- [ ] `T13.1` `ctx.upsert(path, key, data) → Ref<T>`
+- [ ] `T13.2` `ctx.upsertMany(...)` with per-chunk rollback
+- [ ] `T13.3` `ctx.ref(path, key)`
+- [ ] `T13.4` `ctx.loadJson(rel_path, opts)` (no `..`, no symlink-out, BOM strip)
+- [ ] `T13.5` `ctx.loadCsv(rel_path, schema)`
+- [ ] `T13.6` `ctx.t.<name>(input)` builder — proxy-based dispatch on registered transformers
+- [ ] `T13.7` `ctx.trace(eventName, data)` — must require `seed.custom.` prefix
+- [ ] `T13.8` `ctx.db` escape hatch + JSDoc warning
+
+#### T14 — Constraint hints (§13.4)
+- [ ] `T14.1` `ConstraintHints` interface (already in `seed.ts`)
+- [ ] `T14.2` Pre-write conflict query — wire into runner apply path
+- [ ] `T14.3` SurrealDB SCHEMAFULL cross-check (needs schema introspection — out of scope for v0.4.1)
+
+#### T15 — Tooling polish
+- [ ] `T15.1` Pre-commit hook to re-canonicalise cache files
+- [ ] `T15.2` `seed list` shows transformer/schema dependencies
+- [ ] `T15.3` Linter rule for SurrealDB SCHEMAFULL key/UNIQUE alignment
+
+### P3 — Backlog
+
+- [ ] `T16.1` Rust-side parity already shipped — these crates exist to flip TS scoreboard rows
+- [ ] `T16.2`–`T16.10` Mirror Rust workspace's open-question backlog (subcollections, multi-tenant scope, --atomic, optimistic concurrency, partial-merge, NDJSON redaction, server-side `applied_at`, generator parallelism, additional backends)
+
+## Completed
+
+- [x] `T11.4` Initial commit + new GitHub repo — scaffolding only. *(2026-05-04)*
+
+## Agent Execution Board
+
+| task_id | priority | owner | target_date | dependencies | status |
+|---------|----------|-------|-------------|--------------|--------|
+
+## History
+
+### Phase 0 — Scaffolding (2026-05-04)
+Bun monorepo at `personal-dev/seed-ts/` with three packages:
+`@servicecute/seed-core`, `@servicecute/surrealdb-seed`,
+`@servicecute/firestore-seed`. All public types declared and stub
+classes throw `E_INTERNAL "not yet implemented"`. The runner-context
+API surface (`SeedConfig`, `SeedRunner`, `SeedCommand`,
+`EventEmitter`, `Tracking`, `Lock`, `DbBackend`, `Seed`,
+`SchemaEntry`, `Transformer`, `Generator`) compiles against
+`tsconfig` strict + `noUncheckedIndexedAccess` + `verbatimModuleSyntax`.
+Drafted helpers that are pure (no DB) compile and would work today:
+- `Registry<T>` with name validation
+- `topologicalOrder`
+- `hashCanonical` (§19.3 normalization)
+- `marker(...)` / `asMarker` / `resolveMarkers`
+- `refMarker(...)` / `asRefMarker`
+- `registryToJson` / `registryFromJson` (§16.7)
+- `validateRecord` via AJV draft-2020-12
+- `compareEventShapes` / `parseNdjson` (§11.5.4)
+- `exitCodeFor` (§11.3)
+
+Parity fixtures + expected post-state files copied from the Rust
+workspace (`rust-workspace/seed-parity/`) so cross-implementation
+parity is byte-equivalent at the data layer.
+
+## Notes
+
+- Spec is the load-bearing artifact: `registry/seed-spec/seed-spec.md`
+  v0.4.1. When in doubt, the spec wins.
+- The Rust crates at `rust-workspace/lib-seed-*` are the reference
+  implementation. When ambiguity arises, look there first.
+- Cross-language hash compatibility (§19.3) is explicitly NOT a goal
+  — intra-language, intra-file determinism is the contract.
+- Don't add eslint until the implementation lands; bun's tsc check
+  + strict mode covers the immediate need.
+- Test runner is `bun test`. Don't add jest/vitest unless there's a
+  feature gap.

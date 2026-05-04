@@ -1,0 +1,235 @@
+/**
+ * CLI verb surface (spec §11.1). Implemented as a plain
+ * discriminated-union type — TS services typically wrap with their
+ * own commander/clipanion CLI and dispatch through `runCommand`.
+ *
+ * Bodies throw "not implemented yet" until the runner verbs land.
+ */
+
+import type { DbBackend } from "./backend.js";
+import type { LockVerb } from "./lock.js";
+import { type SeedRunner, type SeedState } from "./runner.js";
+import {
+  type EventEmitter,
+  StdoutNdjsonEmitter,
+  TextEmitter,
+} from "./event.js";
+import { exitCodeFor, SeedError } from "./error.js";
+
+export type OutputFormat = "json" | "text";
+
+export type SeedCommand =
+  | {
+      kind: "apply";
+      names: string[];
+      all: boolean;
+      force: boolean;
+      yes: boolean;
+      dryRun: boolean;
+      format: OutputFormat;
+    }
+  | {
+      kind: "regenerate";
+      names: string[];
+      all: boolean;
+      yes: boolean;
+      dryRun: boolean;
+      format: OutputFormat;
+    }
+  | { kind: "status"; format: OutputFormat }
+  | { kind: "list"; format: OutputFormat }
+  | {
+      kind: "reset";
+      names: string[];
+      all: boolean;
+      sudo: boolean;
+      cascade: boolean;
+      yes: boolean;
+      dryRun: boolean;
+      format: OutputFormat;
+    }
+  | {
+      kind: "prune";
+      sudo: boolean;
+      cascade: boolean;
+      dryRun: boolean;
+      yes: boolean;
+      format: OutputFormat;
+    }
+  | { kind: "validate"; names: string[]; format: OutputFormat }
+  | { kind: "forceUnlock"; verb: LockVerb }
+  | { kind: "exportRegistry" };
+
+export function emitterFor(format: OutputFormat): EventEmitter {
+  return format === "text" ? new TextEmitter() : new StdoutNdjsonEmitter();
+}
+
+/**
+ * Run a parsed {@link SeedCommand} against a runner. Returns the exit
+ * code the host binary should pass to `process.exit` (§11.3).
+ *
+ * **Stub** — most branches throw until the corresponding runner
+ * methods land.
+ */
+export async function runCommand<B extends DbBackend>(
+  runner: SeedRunner<B>,
+  cmd: SeedCommand,
+): Promise<number> {
+  try {
+    await dispatch(runner, cmd);
+    return 0;
+  } catch (e) {
+    const err = e instanceof SeedError ? e : undefined;
+    process.stderr.write(`seed: ${(e as Error).message}\n`);
+    return exitCodeFor(err?.code);
+  }
+}
+
+async function dispatch<B extends DbBackend>(
+  runner: SeedRunner<B>,
+  cmd: SeedCommand,
+): Promise<void> {
+  switch (cmd.kind) {
+    case "apply":
+      if (cmd.dryRun) {
+        await runner.validate(effectiveNames(cmd.names, cmd.all));
+        return;
+      }
+      if (cmd.force) {
+        await runner.applyForce(effectiveNames(cmd.names, cmd.all));
+        return;
+      }
+      await runner.apply(effectiveNames(cmd.names, cmd.all));
+      return;
+    case "regenerate":
+      await runner.regenerate(effectiveNames(cmd.names, cmd.all));
+      return;
+    case "status": {
+      const entries = await runner.status();
+      for (const e of entries) {
+        process.stdout.write(`${e.name}\t${labelState(e.state)}\n`);
+      }
+      return;
+    }
+    case "list":
+      for (const s of runner.list()) {
+        process.stdout.write(
+          `${s.name}\tscope=${JSON.stringify(s.scope)}\tdependsOn=${JSON.stringify(s.dependsOn)}\trequires=${JSON.stringify(s.requires)}\n`,
+        );
+      }
+      return;
+    case "reset":
+      if (cmd.dryRun) {
+        process.stdout.write(
+          `dry-run reset: names=${JSON.stringify(cmd.names)} all=${cmd.all} cascade=${cmd.cascade}\n`,
+        );
+        return;
+      }
+      if (!cmd.yes && !(await confirmReset(cmd.all, cmd.cascade, cmd.names))) {
+        throw SeedError.coded(
+          "E_RESET_RESTRICTED",
+          "reset aborted by operator",
+        );
+      }
+      if (cmd.all) {
+        await runner.resetAll(cmd.sudo);
+      } else {
+        await runner.reset(cmd.names, cmd.cascade, cmd.sudo);
+      }
+      return;
+    case "prune": {
+      const dry = await runner.prune(false, cmd.cascade, true);
+      if (dry.length === 0) {
+        process.stdout.write("seed prune: no orphaned tracking entries.\n");
+        return;
+      }
+      if (cmd.dryRun) {
+        for (const n of dry) process.stdout.write(`would prune: ${n}\n`);
+        return;
+      }
+      if (!cmd.yes && !(await confirmPrune(dry, cmd.cascade))) {
+        throw SeedError.coded("E_RESET_RESTRICTED", "prune aborted by operator");
+      }
+      const pruned = await runner.prune(cmd.sudo, cmd.cascade, false);
+      for (const n of pruned) process.stdout.write(`pruned: ${n}\n`);
+      return;
+    }
+    case "validate":
+      await runner.validate(cmd.names);
+      return;
+    case "forceUnlock":
+      await runner.forceUnlock(cmd.verb);
+      return;
+    case "exportRegistry":
+      process.stdout.write(runner.exportRegistry() + "\n");
+      return;
+  }
+}
+
+function effectiveNames(names: string[], all: boolean): string[] {
+  return all ? [] : names;
+}
+
+function labelState(state: SeedState): string {
+  switch (state.kind) {
+    case "pending":
+      return "pending";
+    case "applied":
+      return "applied";
+    case "drifted":
+      return "drifted";
+    case "orphaned":
+      return "orphaned (❓)";
+  }
+}
+
+async function confirmReset(
+  all: boolean,
+  cascade: boolean,
+  names: string[],
+): Promise<boolean> {
+  if (all) {
+    process.stderr.write(
+      "About to reset every applied seed in reverse topological order (cascade=true).\n",
+    );
+  } else {
+    process.stderr.write(
+      `About to reset ${names.length} seed(s): ${JSON.stringify(names)} (cascade=${cascade}).\n`,
+    );
+  }
+  process.stderr.write(
+    "This deletes the records each seed wrote. Tracking entries are removed.\n",
+  );
+  return promptYesNo("Proceed?");
+}
+
+async function confirmPrune(names: string[], cascade: boolean): Promise<boolean> {
+  process.stderr.write(
+    `About to prune ${names.length} orphaned tracking entr${names.length === 1 ? "y" : "ies"} (cascade=${cascade}):\n`,
+  );
+  for (const n of names) process.stderr.write(`  - ${n}\n`);
+  if (cascade) {
+    process.stderr.write(
+      "With --cascade, the underlying records will also be deleted.\n",
+    );
+  }
+  return promptYesNo("Proceed?");
+}
+
+async function promptYesNo(message: string): Promise<boolean> {
+  process.stderr.write(`${message} [y/N] `);
+  const chunks: Buffer[] = [];
+  return new Promise<boolean>((resolve) => {
+    const onData = (chunk: Buffer): void => {
+      chunks.push(chunk);
+      const buf = Buffer.concat(chunks);
+      const newlineIdx = buf.indexOf(0x0a);
+      if (newlineIdx === -1) return;
+      process.stdin.off("data", onData);
+      const line = buf.subarray(0, newlineIdx).toString("utf8").trim().toLowerCase();
+      resolve(line === "y" || line === "yes");
+    };
+    process.stdin.on("data", onData);
+    process.stdin.once("end", () => resolve(false));
+  });
+}

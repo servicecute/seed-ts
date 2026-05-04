@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+.bun/
+
+# Build output
+dist/
+*.tsbuildinfo
+build/
+
+# Editor
+.vscode/
+.idea/
+.DS_Store
+
+# Env / local
+.env
+.env.local
+*.log
+
+# Test artifacts
+coverage/
+.nyc_output/
