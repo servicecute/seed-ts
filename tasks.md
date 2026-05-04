@@ -31,14 +31,14 @@ trackable side-by-side. Sibling reference: `rust-workspace/lib-seed-core/tasks.m
 - [x] `T1.12` `SurrealBackend.deletePaths` returns `DeleteResult { deleted, missing }`; FK rejection → `E_RESET_FK_HELD`
 
 #### T2 — `@servicecute/seed-core` runner orchestration
-- [ ] `T2.1` `topologicalOrder` body (already drafted) — verify alphabetical tiebreak per §13.6 + cycle detection
-- [ ] `T2.2` `hashCanonical` (already drafted) — verify it strips comments + collapses whitespace per §19.3
-- [ ] `T2.3` Drift detection (`checkDrift` already drafted) — wire into apply path
-- [ ] `T2.4` Scope gate (`checkScope`/`rejectProductionScope` already drafted) — wire into apply path
-- [ ] `T2.5` Lock orchestration with heartbeat task using `setInterval` + `clearInterval` (TS equivalent of the Rust tokio-spawn pattern)
-- [ ] `T2.6` Parse-time reference validation pass
-- [ ] `T2.7` `SeedRunner.apply` body
-- [ ] `T2.8` `runner.starting` / `completed` / `failed` events
+- [x] `T2.1` `topologicalOrder` body (already drafted) — verify alphabetical tiebreak per §13.6 + cycle detection *(test in `packages/seed-core/test/seed.test.ts` exercises the spec's worked example, cycle detection, and undeclared-dep rejection.)*
+- [x] `T2.2` `hashCanonical` (already drafted) — verify it strips comments + collapses whitespace per §19.3 *(four-test coverage for cosmetic stability, identifier-rename detection, format prefix, self-consistency.)*
+- [x] `T2.3` Drift detection (`checkDrift` already drafted) — wire into apply path *(`applyLoop` now calls `checkDrift` and emits `seed.drift_detected` warn before propagating `E_DRIFT_REFUSED`.)*
+- [x] `T2.4` Scope gate (`checkScope`/`rejectProductionScope` already drafted) — wire into apply path *(scope check + production rejection both run at dispatch entry; `seed.scope_violation` event emitted on failure.)*
+- [x] `T2.5` Lock orchestration with heartbeat task using `setInterval` + `clearInterval` (TS equivalent of the Rust tokio-spawn pattern) *(`LockGuard` class manages claim + interval; cadence is `max(1s, ttlMs/3)`; cleanup awaits release. Heartbeat unrefs the timer so it doesn't keep the process alive.)*
+- [x] `T2.6` Parse-time reference validation pass *(`validateReferences` runs at top of `dispatchInner` — checks every seed's `requires`, `requiresSchemas`, `dependsOn`. Surfaces `E_TRANSFORMER_MISSING`, `E_SCHEMA_NOT_FOUND`, `E_SCHEMA_VERSION_MISMATCH`, and `E_INTERNAL` for unknown deps.)*
+- [x] `T2.7` `SeedRunner.apply` body *(orchestrates: production-scope reject, validateReferences, topologicalOrder, backend.setup, lock acquire+heartbeat, per-seed scope/drift/skip/transformer markers/$ref resolution/UNIQUE pre-check/JSON Schema validation/upsertBatch/cross-seed ownership transfer/tracking.upsert. `applyForce` shares the same path with `force=true`.)*
+- [x] `T2.8` `runner.starting` / `completed` / `failed` events *(emitted via `makeEvent`; the dispatcher emits them around every verb and threads the right `verb`, `applied_count`, `skipped_count`, `error_count`, `duration_ms` payload.)*
 
 ### P1 — Must-have for v0.4.1 conformance
 
@@ -157,7 +157,7 @@ trackable side-by-side. Sibling reference: `rust-workspace/lib-seed-core/tasks.m
 |---------|----------|-------|-------------|--------------|--------|
 | T1.1–T1.4, T1.10 | P0 | claude | 2026-05-04 | none | completed |
 | T1.5–T1.9, T1.11, T1.12 | P0 | claude | 2026-05-04 | T1.10 | completed |
-| T2.1–T2.8 | P0 | claude | 2026-05-04 | T1 | in_progress |
+| T2.1–T2.8 | P0 | claude | 2026-05-04 | T1 | completed |
 
 ## History
 
