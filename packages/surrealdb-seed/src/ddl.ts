@@ -18,7 +18,7 @@ DEFINE FIELD IF NOT EXISTS name                    ON TABLE __seeds TYPE string;
 DEFINE FIELD IF NOT EXISTS applied_at              ON TABLE __seeds TYPE datetime;
 DEFINE FIELD IF NOT EXISTS key_hash                ON TABLE __seeds TYPE string;
 DEFINE FIELD IF NOT EXISTS scope                   ON TABLE __seeds TYPE array<string>;
-DEFINE FIELD IF NOT EXISTS paths_touched           ON TABLE __seeds TYPE array<string> FLEXIBLE;
+DEFINE FIELD IF NOT EXISTS paths_touched           ON TABLE __seeds TYPE array<string>;
 DEFINE FIELD IF NOT EXISTS tracking_schema_version ON TABLE __seeds TYPE string;
 DEFINE FIELD IF NOT EXISTS spec_version            ON TABLE __seeds TYPE string;
 DEFINE INDEX IF NOT EXISTS __seeds_name_idx ON TABLE __seeds COLUMNS name UNIQUE;
