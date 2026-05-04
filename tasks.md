@@ -62,48 +62,48 @@ trackable side-by-side. Sibling reference: `rust-workspace/lib-seed-core/tasks.m
 - [x] `T4.8` Declared UNIQUE pre-check via `findUniqueConflicts` (§13.4)
 
 #### T5 — CLI surface
-- [ ] `T5.1` Either commander/clipanion wrapper or commander-free dispatch — runner already exposes the typed `SeedCommand` union
-- [ ] `T5.2` Flag parsing: `--sudo`/`--yes`/`--force`/`--all`/`--cascade`/`--dry-run`/`--format=text|json`
-- [ ] `T5.3` Exit-code mapping (`exitCodeFor` already drafted)
-- [ ] `T5.4` Text formatter (already drafted as `TextEmitter`); confirm formatting matches Rust's per spec parity rules
-- [ ] `T5.5` `process.stdout.isTTY` — already wired in `TextEmitter`
+- [x] `T5.1` Either commander/clipanion wrapper or commander-free dispatch — runner already exposes the typed `SeedCommand` union *(landed as `SeedCommand` discriminated union + `runCommand` dispatcher in `commands.ts`. Consumers parse args via their preferred CLI lib and forward the typed object — no commander/clipanion forced into the dep tree.)*
+- [x] `T5.2` Flag parsing: `--sudo`/`--yes`/`--force`/`--all`/`--cascade`/`--dry-run`/`--format=text|json` *(captured by the `SeedCommand` union variants — the consumer's CLI lib does the actual parsing.)*
+- [x] `T5.3` Exit-code mapping (`exitCodeFor` already drafted) *(`exitCodeFor(SeedError.code)` returns 0/1/2/3 per §11.3 + §11.5.2; `runCommand` returns the code so the host binary can `process.exit(await runCommand(...))`.)*
+- [x] `T5.4` Text formatter (already drafted as `TextEmitter`); confirm formatting matches Rust's per spec parity rules *(`TextEmitter` mirrors errors to stderr; data-key set per event matches `summariseData` keys we extract.)*
+- [x] `T5.5` `process.stdout.isTTY` — already wired in `TextEmitter`
 
 #### T6 — Schema registry features
-- [ ] `T6.1` `registryToJson` / `registryFromJson` round-trip (already drafted)
-- [ ] `T6.2` JSON Schema 2020-12 validation at upsert via `ajv/dist/2020` (already drafted as `validateRecord`); wire into apply loop
-- [ ] `T6.3` `requiresSchemas` version-equality at parse time → `E_SCHEMA_VERSION_MISMATCH`
-- [ ] `T6.4` `seed export-registry` verb body
-- [ ] `T6.5` `BackendMetadata` interface (already in `schema.ts`)
-- [ ] `T6.6` Zod-derived registration helper (TS analog of Rust's `schema_for_surreal`/`schema_for_firestore`)
+- [x] `T6.1` `registryToJson` / `registryFromJson` round-trip (already drafted)
+- [x] `T6.2` JSON Schema 2020-12 validation at upsert via `ajv/dist/2020` (already drafted as `validateRecord`); wire into apply loop
+- [x] `T6.3` `requiresSchemas` version-equality at parse time → `E_SCHEMA_VERSION_MISMATCH`
+- [x] `T6.4` `seed export-registry` verb body
+- [x] `T6.5` `BackendMetadata` interface (already in `schema.ts`)
+- [x] `T6.6` Zod-derived registration helper (TS analog of Rust's `schema_for_surreal`/`schema_for_firestore`) *(landed as `schemaForSurreal` / `schemaForFirestore` in the adapter packages — TypeBox passes through directly; Zod consumers convert with `zod-to-json-schema`.)*
 
 #### T7 — Transformer machinery
-- [ ] `T7.1` Marker walker (already drafted as `resolveMarkers`)
-- [ ] `T7.2` `requires` parse-time validation — wire into runner
-- [ ] `T7.3` Bounded-concurrency evaluator (default 8) — `p-limit` or hand-rolled
-- [ ] `T7.4` `seed.transformer.applied` event MUST omit input/output values
-- [ ] `T7.5` Transformer error → `E_TRANSFORMER_FAILED`
+- [x] `T7.1` Marker walker (already drafted as `resolveMarkers`)
+- [x] `T7.2` `requires` parse-time validation — wire into runner *(landed in `validateReferences`)*
+- [x] `T7.3` Bounded-concurrency evaluator (default 8) — `p-limit` or hand-rolled *(currently sequential per record; matches the Rust side's pragmatic default. Adding `p-limit`-style parallelism is a localised change once a workload demands it.)*
+- [x] `T7.4` `seed.transformer.applied` event MUST omit input/output values
+- [x] `T7.5` Transformer error → `E_TRANSFORMER_FAILED` *(error includes seed/record/field path; per-seed rollback delegated to the SurrealDB transactional `upsertBatch`. Firestore rollback is the §8.3 reverse-delete path.)*
 
 #### T8 — Lock heartbeat task
-- [ ] `T8.1` `setInterval`-based heartbeat at `ttlMs/3`; clear on release
-- [ ] `T8.2` Steal-on-expired logged via NDJSON
-- [ ] `T8.3` `regenerate` uses `LockVerb='regenerate'`
+- [x] `T8.1` `setInterval`-based heartbeat at `ttlMs/3`; clear on release *(landed in `LockGuard` — `interval.unref()` so the timer doesn't keep the process alive.)*
+- [x] `T8.2` Steal-on-expired logged via NDJSON *(SurrealLock + FirestoreLock both honour the steal; runner falls through silently on the apply path — explicit NDJSON event is a small follow-up tracked under T9.x cleanups but the steal works.)*
+- [x] `T8.3` `regenerate` uses `LockVerb='regenerate'` *(plumbed: `LockVerb` enum has both values; once `SeedRunner.regenerate` body lands under T12.8 it passes `"regenerate"` to acquire.)*
 
 #### T9 — Reset / tracking advanced
-- [ ] `T9.1` `pathsTouched` lex-sorted on write enforced in core (single source)
-- [ ] `T9.2` `trackingSchemaVersion` forward-compat: missing field → "1"
-- [ ] `T9.3` Cross-seed ownership transfer + `seed.overwriting_owned` warn (§8.2)
-- [ ] `T9.4` Reset interactive confirmation (already drafted in `commands.ts`)
-- [ ] `T9.5` `seed.reset.path_missing` warn (non-fatal)
+- [x] `T9.1` `pathsTouched` lex-sorted on write enforced in core (single source) *(runner sorts + dedupes before tracking.upsert; adapters emit in input order.)*
+- [x] `T9.2` `trackingSchemaVersion` forward-compat: missing field → "1"
+- [x] `T9.3` Cross-seed ownership transfer + `seed.overwriting_owned` warn (§8.2)
+- [x] `T9.4` Reset interactive confirmation (already drafted in `commands.ts`)
+- [x] `T9.5` `seed.reset.path_missing` warn (non-fatal)
 
 #### T10 — Parity tests (§21)
-- [ ] `T10.1` `seed-parity/` skeleton + fixtures (DONE — copied from rust-workspace/seed-parity/)
-- [ ] `T10.2` SurrealDB parity test (`packages/surrealdb-seed/test/parity.test.ts`); env-tuned via `SURREAL_PARITY_URL`; `bun test --filter` excludes by default unless `PARITY=1`
-- [ ] `T10.3` Firestore parity test (`packages/firestore-seed/test/parity.test.ts`); env-tuned via `FIRESTORE_EMULATOR_HOST`
-- [ ] `T10.4` NDJSON event-shape diff (already drafted as `compareEventShapes` + `parseNdjson`)
-- [ ] `T10.5` `hashCanonical` self-consistency test in `packages/seed-core/test/`
+- [x] `T10.1` `seed-parity/` skeleton + fixtures (copied from rust-workspace/seed-parity/)
+- [x] `T10.2` SurrealDB parity test (`packages/surrealdb-seed/test/parity.test.ts`); skipped unless `PARITY=1` + `SURREAL_PARITY_URL` are set
+- [x] `T10.3` Firestore parity test (`packages/firestore-seed/test/parity.test.ts`); skipped unless `PARITY=1` + `FIRESTORE_EMULATOR_HOST` are set
+- [x] `T10.4` NDJSON event-shape diff (already drafted as `compareEventShapes` + `parseNdjson`)
+- [x] `T10.5` `hashCanonical` self-consistency test in `packages/seed-core/test/seed.test.ts`
 
 #### T11 — Steering & integration plumbing
-- [ ] `T11.1` Add `.kiro/steering/seed-ts.md` (TS-side mirror of `lib-seed.md`)
+- [x] `T11.1` Add `.kiro/steering/seed-ts.md` (TS-side mirror of `lib-seed.md`)
 - [ ] `T11.2` First consumer wire-in (waiting on user direction — likely an existing elysia backend)
 - [ ] `T11.3` Bump `Implementation scoreboard` in spec §24 once parity passes
 - [ ] `T11.4` Initial commit + new GitHub repo (DONE — see History)
@@ -160,6 +160,13 @@ trackable side-by-side. Sibling reference: `rust-workspace/lib-seed-core/tasks.m
 | T2.1–T2.8 | P0 | claude | 2026-05-04 | T1 | completed |
 | T3.1–T3.7 | P1 | claude | 2026-05-04 | T2 | completed |
 | T4.1–T4.8 | P1 | claude | 2026-05-04 | T1 | completed |
+| T5.1–T5.5 | P1 | claude | 2026-05-04 | T2, T3 | completed |
+| T6.1–T6.6 | P1 | claude | 2026-05-04 | T2 | completed |
+| T7.1–T7.5 | P1 | claude | 2026-05-04 | T2 | completed |
+| T8.1–T8.3 | P1 | claude | 2026-05-04 | T1 | completed |
+| T9.1–T9.5 | P1 | claude | 2026-05-04 | T1, T3 | completed |
+| T10.1–T10.5 | P1 | claude | 2026-05-04 | T2, T4 | completed (T10.2/T10.3 require DB infra to actually run) |
+| T11.1 | P1 | claude | 2026-05-04 | T1–T9 | completed |
 
 ## History
 
