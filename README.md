@@ -26,8 +26,8 @@ tracked in P0/P1/P2/P3 priorities mirroring the Rust workspace's playbook.
 ## Quick start (once implemented)
 
 ```ts
-import { SeedRunner, SeedConfig, schemaForSurreal } from "@servicecute/seed-core";
-import { SurrealBackend } from "@servicecute/surrealdb-seed";
+import { SeedRunner, SeedConfig } from "@servicecute/seed-core";
+import { SurrealBackend, schemaForSurreal } from "@servicecute/surrealdb-seed";
 import { t } from "elysia";
 
 // Use whatever schema lib you already have — TypeBox/elysia `t`
@@ -47,6 +47,11 @@ await runner.apply([]);
 ```
 
 ### Schema lib bridges
+
+The backend-specific schema helpers live alongside their adapters
+(`schemaForSurreal` in `@servicecute/surrealdb-seed`,
+`schemaForFirestore` in `@servicecute/firestore-seed`). Core stays
+backend-agnostic.
 
 | Lib | Bridge |
 |---|---|

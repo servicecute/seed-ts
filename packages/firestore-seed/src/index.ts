@@ -10,6 +10,7 @@
 export { FirestoreBackend } from "./backend.js";
 export { FirestoreTracking } from "./tracking.js";
 export { FirestoreLock } from "./lock.js";
+export { schemaForFirestore } from "./schema.js";
 
 /** Tracking + lock doc IDs per spec §10.2. */
 export const SEEDS_COLLECTION = "__seeds";
