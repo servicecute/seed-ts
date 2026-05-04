@@ -43,13 +43,13 @@ trackable side-by-side. Sibling reference: `rust-workspace/lib-seed-core/tasks.m
 ### P1 — Must-have for v0.4.1 conformance
 
 #### T3 — Reset / status / list / validate / prune / force-unlock / export-registry
-- [ ] `T3.1` `SeedRunner.reset` body with RESTRICT default (§13.2)
-- [ ] `T3.2` `--cascade` reverse-topological reset
-- [ ] `T3.3` `SeedRunner.status` body
-- [ ] `T3.4` `SeedRunner.list` body
-- [ ] `T3.5` `SeedRunner.validate` body
-- [ ] `T3.6` `SeedRunner.forceUnlock` wired to `Lock.forceUnlock`
-- [ ] `T3.7` `SeedRunner.prune` body — orphaned tracking removal (§10.6)
+- [x] `T3.1` `SeedRunner.reset` body with RESTRICT default (§13.2)
+- [x] `T3.2` `--cascade` reverse-topological reset
+- [x] `T3.3` `SeedRunner.status` body
+- [x] `T3.4` `SeedRunner.list` body
+- [x] `T3.5` `SeedRunner.validate` body
+- [x] `T3.6` `SeedRunner.forceUnlock` wired to `Lock.forceUnlock`
+- [x] `T3.7` `SeedRunner.prune` body — orphaned tracking removal (§10.6)
 
 #### T4 — `@servicecute/firestore-seed` adapter bodies
 - [ ] `T4.1` `FirestoreTracking.upsert` — `__seeds/{name}` set with merge=false (§10.2)
@@ -158,6 +158,7 @@ trackable side-by-side. Sibling reference: `rust-workspace/lib-seed-core/tasks.m
 | T1.1–T1.4, T1.10 | P0 | claude | 2026-05-04 | none | completed |
 | T1.5–T1.9, T1.11, T1.12 | P0 | claude | 2026-05-04 | T1.10 | completed |
 | T2.1–T2.8 | P0 | claude | 2026-05-04 | T1 | completed |
+| T3.1–T3.7 | P1 | claude | 2026-05-04 | T2 | completed |
 
 ## History
 

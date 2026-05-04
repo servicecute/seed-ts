@@ -16,7 +16,12 @@ import {
   type LockVerb,
 } from "./lock.js";
 import { Registry } from "./registry.js";
-import { compile, type SchemaEntry, type SchemaRegistry } from "./schema.js";
+import {
+  compile,
+  registryToJson as registryToJsonImported,
+  type SchemaEntry,
+  type SchemaRegistry,
+} from "./schema.js";
 import {
   asRefMarker,
   topologicalOrder,
@@ -247,65 +252,196 @@ export class SeedRunner<B extends DbBackend> {
     return this.dispatch("apply", names, true);
   }
 
-  reset(_names: string[], _cascade: boolean, _sudo: boolean): Promise<void> {
-    return Promise.reject(
-      SeedError.coded(
-        "E_INTERNAL",
-        "SeedRunner.reset not yet implemented (T3.1)",
-      ),
-    );
+  /**
+   * Reset named seeds (spec §12 + §13.2). RESTRICT by default — refuses
+   * if any applied seed depends on the target. `cascade=true` resets
+   * dependents first in reverse topological order. `sudo` is required
+   * per §11.2.
+   */
+  async reset(names: string[], cascade: boolean, sudo: boolean): Promise<void> {
+    if (!sudo) {
+      throw SeedError.coded(
+        "E_RESET_RESTRICTED",
+        "seed reset requires --sudo (§11.2)",
+      );
+    }
+    await this.dispatchReset(names, cascade, false);
   }
 
-  resetAll(_sudo: boolean): Promise<void> {
-    return Promise.reject(
-      SeedError.coded(
-        "E_INTERNAL",
-        "SeedRunner.resetAll not yet implemented (T3.1)",
-      ),
-    );
+  /** Reset every applied seed; `--cascade` is implied (§13.2). */
+  async resetAll(sudo: boolean): Promise<void> {
+    if (!sudo) {
+      throw SeedError.coded(
+        "E_RESET_RESTRICTED",
+        "seed reset --all requires --sudo (§11.2)",
+      );
+    }
+    await this.dispatchReset([], true, true);
   }
 
-  status(): Promise<SeedStatus[]> {
-    return Promise.reject(
-      SeedError.coded(
-        "E_INTERNAL",
-        "SeedRunner.status not yet implemented (T3.3)",
-      ),
-    );
+  /** Spec §11.1: applied / pending / drifted / orphaned snapshot. */
+  async status(): Promise<SeedStatus[]> {
+    await this.config.backend.setup();
+    const tracked = await this.config.backend.tracking().list();
+    const byName = new Map(tracked.map((t) => [t.name, t]));
+    const out: SeedStatus[] = [];
+    for (const name of this.config.seeds.names()) {
+      const seed = this.config.seeds.lookup(name)!;
+      const t = byName.get(name);
+      let state: SeedState;
+      if (!t) {
+        state = { kind: "pending" };
+      } else if (t.keyHash === seed.keyHash) {
+        state = { kind: "applied", keyHash: t.keyHash, appliedAt: t.appliedAt };
+      } else {
+        state = {
+          kind: "drifted",
+          trackedHash: t.keyHash,
+          currentHash: seed.keyHash,
+        };
+      }
+      out.push({ name, state });
+    }
+    // Orphans — tracking entries with no matching seed in the registry.
+    for (const t of tracked) {
+      if (!this.config.seeds.lookup(t.name)) {
+        out.push({
+          name: t.name,
+          state: {
+            kind: "orphaned",
+            appliedAt: t.appliedAt,
+            pathsTouched: t.pathsTouched,
+          },
+        });
+      }
+    }
+    out.sort((a, b) => a.name.localeCompare(b.name));
+    return out;
   }
 
+  /** Spec §11.1: enumerate every defined seed regardless of state. */
   list(): SeedSummary[] {
-    throw SeedError.coded(
-      "E_INTERNAL",
-      "SeedRunner.list not yet implemented (T3.4)",
-    );
+    const out: SeedSummary[] = this.config.seeds.names().map((name) => {
+      const seed = this.config.seeds.lookup(name)!;
+      return {
+        name: seed.name,
+        scope: seed.scope,
+        dependsOn: seed.dependsOn,
+        requires: seed.requires,
+        requiresSchemas: { ...seed.requiresSchemas },
+      };
+    });
+    out.sort((a, b) => a.name.localeCompare(b.name));
+    return out;
   }
 
-  validate(_names: string[]): Promise<void> {
-    return Promise.reject(
-      SeedError.coded(
-        "E_INTERNAL",
-        "SeedRunner.validate not yet implemented (T3.5)",
-      ),
-    );
+  /**
+   * Spec §11.1: dry-run validation pass. Same parse-time checks as
+   * apply, plus invokes each seed's `SeedAction.produce` (if
+   * registered) so consumers see fixture-builder errors without
+   * touching the DB.
+   */
+  async validate(names: string[]): Promise<void> {
+    const started = Date.now();
+    this.emit("info", "runner.starting", {
+      verb: "validate",
+      args: names,
+      format: "json",
+      backend: this.config.backend.name(),
+      scope_target: this.config.scopeTarget,
+    });
+
+    try {
+      for (const name of this.config.seeds.names()) {
+        rejectProductionScope(this.config.seeds.lookup(name)!);
+      }
+      validateReferences(this.config);
+      const topo = topologicalOrder(this.config.seeds);
+      const targetSet = names.length === 0 ? new Set(topo) : new Set(names);
+      for (const name of topo) {
+        if (!targetSet.has(name)) continue;
+        const seed = this.config.seeds.lookup(name)!;
+        checkScope(seed, this.config.scopeTarget);
+        let recordCount = 0;
+        const action = this.config.actions.lookup(name);
+        if (action) {
+          const writes = await action.produce();
+          recordCount = writes.length;
+        }
+        this.emit(
+          "info",
+          "seed.validate.ok",
+          { record_count: recordCount, ref_count: 0 },
+          name,
+        );
+      }
+    } catch (e) {
+      const err = e instanceof SeedError ? e : undefined;
+      this.emit("error", "runner.failed", {
+        verb: "validate",
+        error_code: err?.code ?? "E_INTERNAL",
+        message: (e as Error).message,
+      });
+      throw e;
+    }
+
+    this.emit("info", "runner.completed", {
+      verb: "validate",
+      duration_ms: Date.now() - started,
+      applied_count: 0,
+      skipped_count: 0,
+      error_count: 0,
+    });
   }
 
-  prune(_sudo: boolean, _cascade: boolean, _dryRun: boolean): Promise<string[]> {
-    return Promise.reject(
-      SeedError.coded(
-        "E_INTERNAL",
-        "SeedRunner.prune not yet implemented (T3.7)",
-      ),
+  /**
+   * Remove orphaned tracking entries (spec §10.6). `cascade` also
+   * deletes the underlying records; `dryRun` only reports.
+   */
+  async prune(
+    sudo: boolean,
+    cascade: boolean,
+    dryRun: boolean,
+  ): Promise<string[]> {
+    if (!sudo && !dryRun) {
+      throw SeedError.coded(
+        "E_RESET_RESTRICTED",
+        "seed prune requires --sudo (§11.2)",
+      );
+    }
+    await this.config.backend.setup();
+    const tracked = await this.config.backend.tracking().list();
+    const orphans = tracked.filter((t) => !this.config.seeds.lookup(t.name));
+    const names = orphans.map((t) => t.name);
+    if (dryRun) return names;
+
+    const holder = buildHolder(this.config.holderLabel);
+    const claim = await this.config.backend.lock().acquire(
+      "apply",
+      holder,
+      this.config.lockTtlMs,
     );
+    const guard = new LockGuard(
+      this.config.backend,
+      claim,
+      Math.max(1000, Math.floor(this.config.lockTtlMs / 3)),
+    );
+    try {
+      for (const orphan of orphans) {
+        if (cascade) {
+          await this.config.backend.deletePaths(orphan.pathsTouched);
+        }
+        await this.config.backend.tracking().remove(orphan.name);
+      }
+    } finally {
+      await guard.release();
+    }
+    return names;
   }
 
-  forceUnlock(_verb: LockVerb): Promise<void> {
-    return Promise.reject(
-      SeedError.coded(
-        "E_INTERNAL",
-        "SeedRunner.forceUnlock not yet implemented (T3.6)",
-      ),
-    );
+  async forceUnlock(verb: LockVerb): Promise<void> {
+    await this.config.backend.setup();
+    await this.config.backend.lock().forceUnlock(verb);
   }
 
   regenerate(_names: string[]): Promise<void> {
@@ -317,11 +453,193 @@ export class SeedRunner<B extends DbBackend> {
     );
   }
 
+  /** Spec §11.1 + §16.7: emit the schema registry as canonical JSON. */
   exportRegistry(): string {
-    throw SeedError.coded(
-      "E_INTERNAL",
-      "SeedRunner.exportRegistry not yet implemented (T6.4)",
+    return registryToJsonImported(this.config.schemas);
+  }
+
+  // ────────────────── private reset orchestration ──────────────────
+
+  private async dispatchReset(
+    names: string[],
+    cascade: boolean,
+    all: boolean,
+  ): Promise<void> {
+    const started = Date.now();
+    this.emit("info", "runner.starting", {
+      verb: "reset",
+      args: names,
+      format: "json",
+      backend: this.config.backend.name(),
+      scope_target: this.config.scopeTarget,
+      cascade,
+      all,
+    });
+
+    let result: { removed: number; skipped: number };
+    try {
+      result = await this.dispatchResetInner(names, cascade, all);
+    } catch (e) {
+      const err = e instanceof SeedError ? e : undefined;
+      this.emit("error", "runner.failed", {
+        verb: "reset",
+        error_code: err?.code ?? "E_INTERNAL",
+        message: (e as Error).message,
+      });
+      throw e;
+    }
+
+    this.emit("info", "runner.completed", {
+      verb: "reset",
+      duration_ms: Date.now() - started,
+      applied_count: result.removed,
+      skipped_count: result.skipped,
+      error_count: 0,
+    });
+  }
+
+  private async dispatchResetInner(
+    names: string[],
+    cascade: boolean,
+    all: boolean,
+  ): Promise<{ removed: number; skipped: number }> {
+    for (const name of this.config.seeds.names()) {
+      rejectProductionScope(this.config.seeds.lookup(name)!);
+    }
+
+    await this.config.backend.setup();
+
+    const tracked = await this.config.backend.tracking().list();
+    const appliedNames = new Set(tracked.map((t) => t.name));
+    const trackedByName = new Map(tracked.map((t) => [t.name, t]));
+
+    const targets = all
+      ? Array.from(appliedNames)
+      : names.length === 0
+        ? (() => {
+            throw SeedError.coded(
+              "E_RESET_RESTRICTED",
+              "seed reset requires either --all or one or more seed names",
+            );
+          })()
+        : names;
+
+    for (const name of targets) {
+      if (!appliedNames.has(name)) {
+        throw SeedError.coded(
+          "E_RESET_RESTRICTED",
+          `seed ${JSON.stringify(name)} is not applied`,
+        );
+      }
+    }
+
+    // §13.6: build reverse-topological order over the applied set.
+    const topo = topologicalOrder(this.config.seeds);
+    const appliedTopo = topo.filter((n) => appliedNames.has(n));
+    const reverseTopo = [...appliedTopo].reverse();
+
+    // §13.2 RESTRICT: refuse if any applied seed depends on the
+    // target and we're not cascading.
+    if (!cascade) {
+      for (const target of targets) {
+        const blockers: string[] = [];
+        for (const name of appliedTopo) {
+          if (name === target) continue;
+          const seed = this.config.seeds.lookup(name);
+          if (seed && seed.dependsOn.includes(target)) {
+            blockers.push(name);
+          }
+        }
+        if (blockers.length > 0) {
+          this.emit(
+            "error",
+            "seed.reset.blocked",
+            { dependent_seeds: blockers },
+            target,
+          );
+          throw SeedError.coded(
+            "E_RESET_RESTRICTED",
+            `reset of ${JSON.stringify(target)} blocked by applied dependents: ${JSON.stringify(blockers)}; pass --cascade to override`,
+          );
+        }
+      }
+    }
+
+    // Resolved set: cascade → transitive applied dependents + targets;
+    // non-cascade → just the targets.
+    const resolved = (() => {
+      if (!cascade && !all) {
+        return reverseTopo.filter((n) => targets.includes(n));
+      }
+      const targetSet = new Set(targets);
+      const include = new Set<string>(targets);
+      for (const name of appliedTopo) {
+        if (include.has(name)) continue;
+        const seed = this.config.seeds.lookup(name);
+        if (!seed) continue;
+        if (seed.dependsOn.some((d) => include.has(d) || targetSet.has(d))) {
+          include.add(name);
+        }
+      }
+      return reverseTopo.filter((n) => include.has(n));
+    })();
+
+    // §8.4: acquire apply-class lock — reset shares the slot.
+    const holder = buildHolder(this.config.holderLabel);
+    const claim = await this.config.backend.lock().acquire(
+      "apply",
+      holder,
+      this.config.lockTtlMs,
     );
+    const guard = new LockGuard(
+      this.config.backend,
+      claim,
+      Math.max(1000, Math.floor(this.config.lockTtlMs / 3)),
+    );
+
+    try {
+      let removed = 0;
+      const skipped = 0;
+      for (const name of resolved) {
+        const entry = trackedByName.get(name);
+        if (!entry) {
+          throw SeedError.coded(
+            "E_INTERNAL",
+            `tracking entry vanished for ${JSON.stringify(name)}`,
+          );
+        }
+        this.emit(
+          "info",
+          "seed.reset.starting",
+          {
+            paths_to_delete: entry.pathsTouched,
+            cascade: cascade || all,
+          },
+          name,
+        );
+        const seedStarted = Date.now();
+        const { deleted, missing } = await this.config.backend.deletePaths(
+          entry.pathsTouched,
+        );
+        for (const path of missing) {
+          this.emit("warn", "seed.reset.path_missing", { path_key: path }, name);
+        }
+        await this.config.backend.tracking().remove(name);
+        this.emit(
+          "info",
+          "seed.reset.applied",
+          {
+            record_count: deleted.length,
+            duration_ms: Date.now() - seedStarted,
+          },
+          name,
+        );
+        removed += 1;
+      }
+      return { removed, skipped };
+    } finally {
+      await guard.release();
+    }
   }
 
   // ────────────────── private apply orchestration ──────────────────
