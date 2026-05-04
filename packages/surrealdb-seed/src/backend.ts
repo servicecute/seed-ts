@@ -7,22 +7,25 @@ import {
   type WriteRequest,
   type WriteResult,
 } from "@servicecute/seed-core";
+import type { Surreal } from "surrealdb";
 
 import { SurrealLock } from "./lock.js";
 import { SurrealTracking } from "./tracking.js";
 
 /**
- * SurrealDB adapter — wraps the `surrealdb` npm client.
+ * SurrealDB adapter — wraps a connected `surrealdb` v2 client.
  *
- * **Stub.** Bodies will land under T1.x in seed-ts/tasks.md.
+ * Implements `DbBackend` from `@servicecute/seed-core`. Tracking is
+ * complete (T1.1–T1.4); lock setup is wired (T1.10); lock verb
+ * bodies (T1.5–T1.9) and `upsertBatch` / `deletePaths` (T1.11–T1.12)
+ * land in subsequent batches.
  */
 export class SurrealBackend implements DbBackend {
-  // Typed loosely until we pin the surrealdb v1.x client surface.
-  private readonly db: unknown;
+  private readonly db: Surreal;
   private readonly _tracking: SurrealTracking;
   private readonly _lock: SurrealLock;
 
-  constructor(db: unknown) {
+  constructor(db: Surreal) {
     this.db = db;
     this._tracking = new SurrealTracking(db);
     this._lock = new SurrealLock(db);
