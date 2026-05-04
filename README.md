@@ -26,15 +26,37 @@ tracked in P0/P1/P2/P3 priorities mirroring the Rust workspace's playbook.
 ## Quick start (once implemented)
 
 ```ts
-import { SeedRunner, SeedConfig } from "@servicecute/seed-core";
+import { SeedRunner, SeedConfig, schemaForSurreal } from "@servicecute/seed-core";
 import { SurrealBackend } from "@servicecute/surrealdb-seed";
+import { t } from "elysia";
+
+// Use whatever schema lib you already have — TypeBox/elysia `t`
+// produces JSON Schema directly; for Zod, convert with
+// `zod-to-json-schema` (peer dep, not bundled).
+const Country = t.Object({
+  iso: t.String({ minLength: 2, maxLength: 2 }),
+  name: t.String(),
+});
 
 const backend = new SurrealBackend(db);
 const config = new SeedConfig({ backend, scopeTarget: "development" });
-config.seeds.register("baseline-tenants", { /* ... */ });
+config.schemas.register("countries", schemaForSurreal("countries", "1", Country));
+config.seeds.register("baseline-countries", { /* ... */ });
 const runner = new SeedRunner(config);
 await runner.apply([]);
 ```
+
+### Schema lib bridges
+
+| Lib | Bridge |
+|---|---|
+| **TypeBox** (elysia `t`) | Pass directly: `schemaForSurreal("name", "1", User)` — TBox schemas are already JSON Schema 2020-12 |
+| **Zod** | `schemaForSurreal("name", "1", zodToJsonSchema(User))` — install `zod-to-json-schema` as a dep |
+| **Hand-written JSON Schema** | Pass the object literal — `schemaForSurreal("name", "1", { type: "object", ... })` |
+
+`@servicecute/seed-core` deliberately doesn't bundle Zod or TypeBox so
+consumers don't pay for a schema lib they don't use. AJV runs draft
+2020-12 validation against whatever JSON Schema you hand in.
 
 ## Running
 
