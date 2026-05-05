@@ -6,9 +6,9 @@ TypeScript implementation of the seed-spec
 trackable side-by-side. Sibling reference: `rust-workspace/lib-seed-core/tasks.md`.
 
 ## Metadata
-- **Last updated**: 2026-05-04
-- **Active milestone**: v0.4.1 spec parity — `@servicecute/seed-core` orchestration first, then SurrealDB adapter, then Firestore mirror
-- **Spec version**: 0.4.1
+- **Last updated**: 2026-05-05
+- **Active milestone**: v0.4.3 conformant — scope routing (§9.3), backend self-reported scope (§9.4), per-call scope override + --scope CLI flag (§9.5/§11.2) all landed
+- **Spec version**: 0.4.3
 - **Bun version**: ≥ 1.1
 - **Node compatibility**: ≥ 20 (npm-friendly)
 
@@ -167,6 +167,7 @@ trackable side-by-side. Sibling reference: `rust-workspace/lib-seed-core/tasks.m
 | T9.1–T9.5 | P1 | claude | 2026-05-04 | T1, T3 | completed |
 | T10.1–T10.5 | P1 | claude | 2026-05-04 | T2, T4 | completed (T10.2/T10.3 require DB infra to actually run) |
 | T11.1 | P1 | claude | 2026-05-04 | T1–T9 | completed |
+| spec §9.3–§9.5 + §11.2 (scope routing, cross-check, per-call scope, --scope flag) | P0 | claude | 2026-05-05 | T10 | completed |
 
 ## History
 
@@ -194,10 +195,25 @@ Parity fixtures + expected post-state files copied from the Rust
 workspace (`rust-workspace/seed-parity/`) so cross-implementation
 parity is byte-equivalent at the data layer.
 
+### Phase 1 — Spec v0.4.3 scope routing (2026-05-05)
+§9.3 `ScopedBackends<B>` registry of `name → lazy factory` becomes
+the recommended wiring; the runner resolves a backend on first use
+per scope and caches the instance. `"production"` is forbidden as a
+registered name, so services that don't register a "production"
+factory cannot reach production. §9.4 `DbBackend.scopeTarget()`
+defence-in-depth tripwire — `SurrealBackend` reads
+`session::ns()`, `FirestoreBackend` reads `projectId` — and the
+runner cross-checks at `setup()` and refuses on mismatch. §9.5
+per-call scope override (`*WithScope` variants on every verb) +
+§11.2 `--scope` flag in the CLI dispatcher. Single-backend
+`new SeedConfig({ backend, scopeTarget })` stays valid as a
+one-factory shortcut. Parity tests use the new
+`runner.config.resolveBackend("development")` read path.
+
 ## Notes
 
 - Spec is the load-bearing artifact: `registry/seed-spec/seed-spec.md`
-  v0.4.1. When in doubt, the spec wins.
+  v0.4.3. When in doubt, the spec wins.
 - The Rust crates at `rust-workspace/lib-seed-*` are the reference
   implementation. When ambiguity arises, look there first.
 - Cross-language hash compatibility (§19.3) is explicitly NOT a goal
