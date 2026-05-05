@@ -28,7 +28,7 @@ import { FirestoreBackend, SEEDS_COLLECTION } from "../src/index.js";
  * Required env:
  *   PARITY=1                       enables the suite
  *   FIRESTORE_EMULATOR_HOST        e.g. localhost:8080
- *   FIRESTORE_PARITY_PROJECT       defaults to seed-parity
+ *   FIRESTORE_PARITY_PROJECT       defaults to development (matches scope_target)
  */
 
 const PARITY_ENABLED =
@@ -74,9 +74,11 @@ function baselineCountriesSeed(): Seed {
 
 function connectTestDb(): Firestore {
   if (getApps().length === 0) {
+    // Default project = "development" so the §9.4 cross-check
+    // (scope_target == project_id) passes without configuration.
     initializeApp({
       projectId:
-        process.env["FIRESTORE_PARITY_PROJECT"] ?? "seed-parity",
+        process.env["FIRESTORE_PARITY_PROJECT"] ?? "development",
     });
   }
   return getFirestore();
@@ -132,9 +134,8 @@ describe.skipIf(!PARITY_ENABLED)("Firestore parity (T10.3 + T10.4)", () => {
         expect(data.name).toBe(expectedName);
       }
 
-      const tracked = await runner.config.backend
-        .tracking()
-        .get("baseline-countries");
+      const backendForRead = await runner.config.resolveBackend("development");
+      const tracked = await backendForRead.tracking().get("baseline-countries");
       expect(tracked).toBeDefined();
       expect(tracked!.pathsTouched).toEqual([
         "countries/GB",
@@ -143,11 +144,11 @@ describe.skipIf(!PARITY_ENABLED)("Firestore parity (T10.3 + T10.4)", () => {
       ]);
       expect(tracked!.scope).toEqual(["development"]);
       expect(tracked!.trackingSchemaVersion).toBe("1");
-      expect(tracked!.specVersion).toBe("0.4.1");
+      expect(tracked!.specVersion).toBe("0.4.3");
 
       // tracking().list() MUST exclude lock docs (the `_kind`
       // discriminator filter introduced under T4.2).
-      const listed = await runner.config.backend.tracking().list();
+      const listed = await backendForRead.tracking().list();
       expect(listed.length).toBe(1);
       expect(listed[0]!.name).toBe("baseline-countries");
 
@@ -183,7 +184,11 @@ describe.skipIf(!PARITY_ENABLED)("Firestore parity (T10.3 + T10.4)", () => {
         expect(snap.exists).toBe(false);
       }
 
-      const listed = await runner.config.backend.tracking().list();
+      const listed = await (
+        await runner.config.resolveBackend("development")
+      )
+        .tracking()
+        .list();
       expect(listed).toEqual([]);
     } finally {
       await Promise.all(getApps().map((a) => deleteApp(a)));

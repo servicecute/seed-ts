@@ -179,6 +179,27 @@ export class FirestoreBackend implements DbBackend {
     }
   }
 
+  async scopeTarget(): Promise<string | undefined> {
+    // Spec §9.4: the project ID was passed at FirestoreDb
+    // construction. firebase-admin's Firestore.options() returns
+    // a Settings-like object containing the projectId.
+    const opts = (this.db as unknown as { options?: () => unknown }).options?.();
+    if (
+      typeof opts === "object" &&
+      opts !== null &&
+      "projectId" in (opts as Record<string, unknown>)
+    ) {
+      const id = (opts as Record<string, unknown>)["projectId"];
+      if (typeof id === "string" && id !== "") return id;
+    }
+    // Fall back to the app's projectId on the FirestoreDb's parent
+    // app — firebase-admin always exposes it.
+    const app = (this.db as unknown as { app?: { options?: { projectId?: string } } })
+      .app;
+    if (app?.options?.projectId) return app.options.projectId;
+    return undefined;
+  }
+
   name(): string {
     return "firestore";
   }

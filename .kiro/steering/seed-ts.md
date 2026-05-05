@@ -6,7 +6,7 @@ trigger: model_decision
 
 TypeScript implementation of the **seed CLI/runner spec** at
 [registry/seed-spec/seed-spec.md](https://github.com/servicecute/project-registry/blob/main/seed-spec/seed-spec.md)
-(v0.4.1).
+(v0.4.3).
 
 | Package | Role |
 |---|---|
@@ -98,10 +98,16 @@ export function metadata(): Seed {
 
 **Single registry file shape** (`src/seedRegistry.ts`):
 
+The recommended pattern is **scope routing** (spec §9.3): register a
+lazy backend factory for each scope label your service supports.
+`production` is forbidden as a registered name — services that don't
+register a "production" factory cannot reach production. The runner
+selects the active factory using the configured `scopeTarget` (or the
+per-call `--scope` override per §9.5) and resolves it on first use.
+
 ```ts
-import { SeedConfig } from "@servicecute/seed-core";
+import { ScopedBackends, SeedConfig } from "@servicecute/seed-core";
 import { SurrealBackend, schemaForSurreal } from "@servicecute/surrealdb-seed";
-import type { Surreal } from "surrealdb";
 import { t } from "elysia";
 
 import * as baselineCountries from "./seeds/baseline-countries.js";
@@ -111,9 +117,21 @@ const Country = t.Object({
   name: t.String(),
 });
 
-export function buildSeedConfig(db: Surreal): SeedConfig<SurrealBackend> {
+export function buildSeedConfig(): SeedConfig<SurrealBackend> {
+  const backends = new ScopedBackends<SurrealBackend>();
+  backends.register("development", async () => {
+    const db = await connectDev();
+    return new SurrealBackend(db);
+  });
+  backends.register("staging", async () => {
+    const db = await connectStaging();
+    return new SurrealBackend(db);
+  });
+  // Note: NO "production" factory — production is unreachable
+  // from the seed runner by design (§7.3 + §9.3).
+
   const config = new SeedConfig({
-    backend: new SurrealBackend(db),
+    backends,
     scopeTarget: process.env.SURREAL_NAMESPACE ?? "development",
     holderLabel: process.argv.slice(2).join(" "),
   });
@@ -128,6 +146,11 @@ export function buildSeedConfig(db: Surreal): SeedConfig<SurrealBackend> {
   return config;
 }
 ```
+
+**Single-backend escape hatch.** `new SeedConfig({ backend, scopeTarget,
+... })` still works; equivalent to a single-factory router resolved
+under the configured `scopeTarget`. Tests and the simplest services
+prefer it.
 
 ## Schema lib bridges
 
@@ -231,7 +254,7 @@ const config = new SeedConfig({
 
 ## See also
 
-- `registry/seed-spec/seed-spec.md` v0.4.1 — load-bearing artifact.
+- `registry/seed-spec/seed-spec.md` v0.4.3 — load-bearing artifact.
 - `seed-parity/` — cross-language fixtures byte-equivalent to
   `rust-workspace/seed-parity/`.
 - `rust-workspace/lib-seed-*` — the Rust implementation of the same

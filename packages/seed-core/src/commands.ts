@@ -18,6 +18,12 @@ import { exitCodeFor, SeedError } from "./error.js";
 
 export type OutputFormat = "json" | "text";
 
+/**
+ * Spec §11.2: optional `--scope <name>` flag. When set, the runner
+ * routes every backend resolution through `ScopedBackends` for that
+ * label rather than the configured `scopeTarget`. `undefined` keeps the
+ * existing config-driven scope.
+ */
 export type SeedCommand =
   | {
       kind: "apply";
@@ -27,6 +33,7 @@ export type SeedCommand =
       yes: boolean;
       dryRun: boolean;
       format: OutputFormat;
+      scope?: string;
     }
   | {
       kind: "regenerate";
@@ -35,8 +42,9 @@ export type SeedCommand =
       yes: boolean;
       dryRun: boolean;
       format: OutputFormat;
+      scope?: string;
     }
-  | { kind: "status"; format: OutputFormat }
+  | { kind: "status"; format: OutputFormat; scope?: string }
   | { kind: "list"; format: OutputFormat }
   | {
       kind: "reset";
@@ -47,6 +55,7 @@ export type SeedCommand =
       yes: boolean;
       dryRun: boolean;
       format: OutputFormat;
+      scope?: string;
     }
   | {
       kind: "prune";
@@ -55,9 +64,10 @@ export type SeedCommand =
       dryRun: boolean;
       yes: boolean;
       format: OutputFormat;
+      scope?: string;
     }
-  | { kind: "validate"; names: string[]; format: OutputFormat }
-  | { kind: "forceUnlock"; verb: LockVerb }
+  | { kind: "validate"; names: string[]; format: OutputFormat; scope?: string }
+  | { kind: "forceUnlock"; verb: LockVerb; scope?: string }
   | { kind: "exportRegistry" };
 
 export function emitterFor(format: OutputFormat): EventEmitter {
@@ -90,22 +100,34 @@ async function dispatch<B extends DbBackend>(
   cmd: SeedCommand,
 ): Promise<void> {
   switch (cmd.kind) {
-    case "apply":
+    case "apply": {
+      const names = effectiveNames(cmd.names, cmd.all);
       if (cmd.dryRun) {
-        await runner.validate(effectiveNames(cmd.names, cmd.all));
+        await (cmd.scope
+          ? runner.validateWithScope(names, cmd.scope)
+          : runner.validate(names));
         return;
       }
       if (cmd.force) {
-        await runner.applyForce(effectiveNames(cmd.names, cmd.all));
+        await (cmd.scope
+          ? runner.applyForceWithScope(names, cmd.scope)
+          : runner.applyForce(names));
         return;
       }
-      await runner.apply(effectiveNames(cmd.names, cmd.all));
+      await (cmd.scope
+        ? runner.applyWithScope(names, cmd.scope)
+        : runner.apply(names));
       return;
+    }
     case "regenerate":
+      // Regenerate composes apply+reset under the hood; the scope
+      // override flows through whichever inner verb is used.
       await runner.regenerate(effectiveNames(cmd.names, cmd.all));
       return;
     case "status": {
-      const entries = await runner.status();
+      const entries = await (cmd.scope
+        ? runner.statusWithScope(cmd.scope)
+        : runner.status());
       for (const e of entries) {
         process.stdout.write(`${e.name}\t${labelState(e.state)}\n`);
       }
@@ -132,13 +154,19 @@ async function dispatch<B extends DbBackend>(
         );
       }
       if (cmd.all) {
-        await runner.resetAll(cmd.sudo);
+        await (cmd.scope
+          ? runner.resetAllWithScope(cmd.sudo, cmd.scope)
+          : runner.resetAll(cmd.sudo));
       } else {
-        await runner.reset(cmd.names, cmd.cascade, cmd.sudo);
+        await (cmd.scope
+          ? runner.resetWithScope(cmd.names, cmd.cascade, cmd.sudo, cmd.scope)
+          : runner.reset(cmd.names, cmd.cascade, cmd.sudo));
       }
       return;
     case "prune": {
-      const dry = await runner.prune(false, cmd.cascade, true);
+      const dry = await (cmd.scope
+        ? runner.pruneWithScope(false, cmd.cascade, true, cmd.scope)
+        : runner.prune(false, cmd.cascade, true));
       if (dry.length === 0) {
         process.stdout.write("seed prune: no orphaned tracking entries.\n");
         return;
@@ -150,15 +178,21 @@ async function dispatch<B extends DbBackend>(
       if (!cmd.yes && !(await confirmPrune(dry, cmd.cascade))) {
         throw SeedError.coded("E_RESET_RESTRICTED", "prune aborted by operator");
       }
-      const pruned = await runner.prune(cmd.sudo, cmd.cascade, false);
+      const pruned = await (cmd.scope
+        ? runner.pruneWithScope(cmd.sudo, cmd.cascade, false, cmd.scope)
+        : runner.prune(cmd.sudo, cmd.cascade, false));
       for (const n of pruned) process.stdout.write(`pruned: ${n}\n`);
       return;
     }
     case "validate":
-      await runner.validate(cmd.names);
+      await (cmd.scope
+        ? runner.validateWithScope(cmd.names, cmd.scope)
+        : runner.validate(cmd.names));
       return;
     case "forceUnlock":
-      await runner.forceUnlock(cmd.verb);
+      await (cmd.scope
+        ? runner.forceUnlockWithScope(cmd.verb, cmd.scope)
+        : runner.forceUnlock(cmd.verb));
       return;
     case "exportRegistry":
       process.stdout.write(runner.exportRegistry() + "\n");

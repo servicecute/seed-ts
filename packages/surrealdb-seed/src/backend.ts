@@ -196,6 +196,25 @@ export class SurrealBackend implements DbBackend {
     }
   }
 
+  async scopeTarget(): Promise<string | undefined> {
+    // Spec §9.4: read the active namespace from the session.
+    // Returns `undefined` for empty/unset namespaces so the runner's
+    // cross-check skips and trusts the consumer.
+    try {
+      const result = await this.db.query<[string | null | undefined]>(
+        `RETURN session::ns()`,
+      );
+      const ns = result[0];
+      return typeof ns === "string" && ns !== "" ? ns : undefined;
+    } catch (e) {
+      throw SeedError.coded(
+        "E_INTERNAL",
+        `scopeTarget: query session::ns(): ${(e as Error).message}`,
+        e,
+      );
+    }
+  }
+
   name(): string {
     return "surrealdb";
   }

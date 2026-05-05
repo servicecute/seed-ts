@@ -29,7 +29,7 @@ import { SurrealBackend } from "../src/index.js";
  *   SURREAL_PARITY_URL       e.g. ws://localhost:8000
  *   SURREAL_PARITY_USER      defaults to root
  *   SURREAL_PARITY_PASS      defaults to root
- *   SURREAL_NS               defaults to parity
+ *   SURREAL_NS               defaults to development (matches scope_target)
  *   SURREAL_DB               defaults to seedparity
  */
 
@@ -78,7 +78,10 @@ async function connectTestDb(): Promise<Surreal> {
   const url = process.env["SURREAL_PARITY_URL"]!;
   const user = process.env["SURREAL_PARITY_USER"] ?? "root";
   const pass = process.env["SURREAL_PARITY_PASS"] ?? "root";
-  const ns = process.env["SURREAL_NS"] ?? "parity";
+  // Default ns matches the configured scope_target so the §9.4
+  // cross-check passes. Override via SURREAL_NS to run against a
+  // different environment.
+  const ns = process.env["SURREAL_NS"] ?? "development";
   const db = process.env["SURREAL_DB"] ?? "seedparity";
 
   const surreal = new Surreal();
@@ -131,9 +134,8 @@ describe.skipIf(!PARITY_ENABLED)("SurrealDB parity (T10.2 + T10.4)", () => {
       expect(byIso.get("GB")).toBe("United Kingdom");
       expect(byIso.get("JP")).toBe("Japan");
 
-      const tracked = await runner.config.backend
-        .tracking()
-        .get("baseline-countries");
+      const backendForRead = await runner.config.resolveBackend("development");
+      const tracked = await backendForRead.tracking().get("baseline-countries");
       expect(tracked).toBeDefined();
       expect(tracked!.pathsTouched).toEqual([
         "countries:GB",
@@ -142,7 +144,7 @@ describe.skipIf(!PARITY_ENABLED)("SurrealDB parity (T10.2 + T10.4)", () => {
       ]);
       expect(tracked!.scope).toEqual(["development"]);
       expect(tracked!.trackingSchemaVersion).toBe("1");
-      expect(tracked!.specVersion).toBe("0.4.1");
+      expect(tracked!.specVersion).toBe("0.4.3");
 
       // ---- T10.4: NDJSON event-shape diff ---------------------------
       const captured = emitter.drain();
@@ -177,7 +179,11 @@ describe.skipIf(!PARITY_ENABLED)("SurrealDB parity (T10.2 + T10.4)", () => {
       const count = result[0]?.[0]?.n ?? 0;
       expect(count).toBe(0);
 
-      const trackingList = await runner.config.backend.tracking().list();
+      const trackingList = await (
+        await runner.config.resolveBackend("development")
+      )
+        .tracking()
+        .list();
       expect(trackingList).toEqual([]);
     } finally {
       await db.close().catch(() => {});

@@ -1,4 +1,5 @@
 import {
+  ScopedBackends,
   type DbBackend,
   type WriteRequest,
 } from "./backend.js";
@@ -41,8 +42,12 @@ export interface CostCaps {
   perRunUsd?: number;
 }
 
+/** Spec §9.3 single-backend convenience options. */
 export interface SeedConfigOpts<B extends DbBackend> {
-  backend: B;
+  /** Single already-constructed backend. Mutually exclusive with `backends`. */
+  backend?: B;
+  /** Multi-scope router (spec §9.3). Mutually exclusive with `backend`. */
+  backends?: ScopedBackends<B>;
   scopeTarget?: string;
   lockTtlMs?: number;
   generatorTimeoutMs?: number;
@@ -54,7 +59,10 @@ export interface SeedConfigOpts<B extends DbBackend> {
 }
 
 export class SeedConfig<B extends DbBackend> {
-  readonly backend: B;
+  /** Backwards-compat single backend (spec §9.3). */
+  private readonly eager: B | undefined;
+  /** Spec §9.3 multi-scope registry. May be empty when using eager. */
+  readonly backends: ScopedBackends<B>;
   readonly seeds: SeedRegistry = new Registry<Seed>();
   readonly actions: SeedActionRegistry = new Registry();
   readonly schemas: SchemaRegistry = new Registry<SchemaEntry>();
@@ -71,15 +79,57 @@ export class SeedConfig<B extends DbBackend> {
   holderLabel: string;
 
   constructor(opts: SeedConfigOpts<B>) {
-    this.backend = opts.backend;
+    if (opts.backend && opts.backends) {
+      throw new SeedError(
+        "SeedConfig: pass either `backend` (single) or `backends` (router), not both",
+      );
+    }
+    if (!opts.backend && !opts.backends) {
+      throw new SeedError(
+        "SeedConfig: must pass either `backend` (single) or `backends` (router)",
+      );
+    }
+    this.eager = opts.backend;
+    this.backends = opts.backends ?? new ScopedBackends<B>();
     this.scopeTarget = opts.scopeTarget ?? "";
     this.lockTtlMs = opts.lockTtlMs ?? 5 * 60 * 1000;
     this.generatorTimeoutMs = opts.generatorTimeoutMs ?? 60 * 1000;
     this.validationThreshold = opts.validationThreshold ?? 0.2;
     this.costCaps = opts.costCaps ?? {};
     this.emitter = opts.emitter ?? new StdoutNdjsonEmitter();
-    this.specVersion = opts.specVersion ?? "0.4.1";
+    this.specVersion = opts.specVersion ?? "0.4.3";
     this.holderLabel = opts.holderLabel ?? "";
+  }
+
+  /**
+   * Resolve `scope` (per-call override or ambient `scopeTarget`) to
+   * a backend per spec §9.3:
+   *
+   * 1. If the registry has factories, the scope MUST match one of
+   *    them. Unregistered → `E_SCOPE_VIOLATION` listing available
+   *    scopes.
+   * 2. Otherwise the eager (single-backend) fallback applies, but
+   *    only when the requested scope matches the configured
+   *    `scopeTarget` (or `scopeTarget` is empty — the test bypass).
+   * 3. Otherwise `E_INTERNAL` (no backend configured at all).
+   */
+  async resolveBackend(scope: string): Promise<B> {
+    if (this.backends.names().length > 0) {
+      return this.backends.resolve(scope);
+    }
+    if (this.eager) {
+      if (this.scopeTarget === "" || scope === this.scopeTarget) {
+        return this.eager;
+      }
+      throw SeedError.coded(
+        "E_SCOPE_VIOLATION",
+        `scope ${JSON.stringify(scope)} requested but the single-backend SeedConfig is registered only under ${JSON.stringify(this.scopeTarget)}; pass \`backends\` for multi-scope routing`,
+      );
+    }
+    throw SeedError.coded(
+      "E_INTERNAL",
+      "SeedConfig has neither an eager backend nor registered factories",
+    );
   }
 }
 
@@ -240,16 +290,26 @@ export class SeedRunner<B extends DbBackend> {
 
   /**
    * Apply named seeds in topological order (§13.6). Empty `names`
-   * applies every registered seed. Acquires the apply-class lock
-   * (§8.4) before any writes and spawns a heartbeat at TTL/3.
+   * applies every registered seed. Uses ambient `scopeTarget`. For
+   * per-call scope override (§9.5) see `applyWithScope`.
    */
   apply(names: string[]): Promise<void> {
-    return this.dispatch("apply", names, false);
+    return this.dispatch("apply", names, false, undefined);
+  }
+
+  /** Apply with explicit scope override (spec §9.5). */
+  applyWithScope(names: string[], scope: string): Promise<void> {
+    return this.dispatch("apply", names, false, scope);
   }
 
   /** Same as `apply` but with `--force` semantics (§11.1). */
   applyForce(names: string[]): Promise<void> {
-    return this.dispatch("apply", names, true);
+    return this.dispatch("apply", names, true, undefined);
+  }
+
+  /** `applyForce` with explicit scope override (spec §9.5). */
+  applyForceWithScope(names: string[], scope: string): Promise<void> {
+    return this.dispatch("apply", names, true, scope);
   }
 
   /**
@@ -265,7 +325,23 @@ export class SeedRunner<B extends DbBackend> {
         "seed reset requires --sudo (§11.2)",
       );
     }
-    await this.dispatchReset(names, cascade, false);
+    await this.dispatchReset(names, cascade, false, undefined);
+  }
+
+  /** Reset with explicit scope override (spec §9.5). */
+  async resetWithScope(
+    names: string[],
+    cascade: boolean,
+    sudo: boolean,
+    scope: string,
+  ): Promise<void> {
+    if (!sudo) {
+      throw SeedError.coded(
+        "E_RESET_RESTRICTED",
+        "seed reset requires --sudo (§11.2)",
+      );
+    }
+    await this.dispatchReset(names, cascade, false, scope);
   }
 
   /** Reset every applied seed; `--cascade` is implied (§13.2). */
@@ -276,13 +352,36 @@ export class SeedRunner<B extends DbBackend> {
         "seed reset --all requires --sudo (§11.2)",
       );
     }
-    await this.dispatchReset([], true, true);
+    await this.dispatchReset([], true, true, undefined);
+  }
+
+  /** `resetAll` with explicit scope override (spec §9.5). */
+  async resetAllWithScope(sudo: boolean, scope: string): Promise<void> {
+    if (!sudo) {
+      throw SeedError.coded(
+        "E_RESET_RESTRICTED",
+        "seed reset --all requires --sudo (§11.2)",
+      );
+    }
+    await this.dispatchReset([], true, true, scope);
   }
 
   /** Spec §11.1: applied / pending / drifted / orphaned snapshot. */
   async status(): Promise<SeedStatus[]> {
-    await this.config.backend.setup();
-    const tracked = await this.config.backend.tracking().list();
+    return this.statusInner(undefined);
+  }
+
+  /** `status` with explicit scope override (spec §9.5). */
+  async statusWithScope(scope: string): Promise<SeedStatus[]> {
+    return this.statusInner(scope);
+  }
+
+  private async statusInner(
+    scopeOverride: string | undefined,
+  ): Promise<SeedStatus[]> {
+    const scope = this.effectiveScope(scopeOverride);
+    const backend = await this.setupResolved(scope);
+    const tracked = await backend.tracking().list();
     const byName = new Map(tracked.map((t) => [t.name, t]));
     const out: SeedStatus[] = [];
     for (const name of this.config.seeds.names()) {
@@ -342,13 +441,37 @@ export class SeedRunner<B extends DbBackend> {
    * touching the DB.
    */
   async validate(names: string[]): Promise<void> {
+    return this.validateInner(names, undefined);
+  }
+
+  /** `validate` with explicit scope override (spec §9.5). */
+  async validateWithScope(names: string[], scope: string): Promise<void> {
+    return this.validateInner(names, scope);
+  }
+
+  private async validateInner(
+    names: string[],
+    scopeOverride: string | undefined,
+  ): Promise<void> {
     const started = Date.now();
+    const scope = this.effectiveScope(scopeOverride);
+    // Validate is writeless — resolve the backend for naming +
+    // §9.4 cross-check, but do NOT call backend.setup() so we keep
+    // the spec §11.1 dry-run promise.
+    const backend = await this.config.resolveBackend(scope);
+    const reported = await backend.scopeTarget();
+    if (reported !== undefined && scope !== "" && scope !== reported) {
+      throw SeedError.coded(
+        "E_SCOPE_VIOLATION",
+        `validate: scope mismatch — requested ${JSON.stringify(scope)}, backend reports ${JSON.stringify(reported)}`,
+      );
+    }
     this.emit("info", "runner.starting", {
       verb: "validate",
       args: names,
       format: "json",
-      backend: this.config.backend.name(),
-      scope_target: this.config.scopeTarget,
+      backend: backend.name(),
+      scope_target: scope,
     });
 
     try {
@@ -361,7 +484,7 @@ export class SeedRunner<B extends DbBackend> {
       for (const name of topo) {
         if (!targetSet.has(name)) continue;
         const seed = this.config.seeds.lookup(name)!;
-        checkScope(seed, this.config.scopeTarget);
+        checkScope(seed, scope);
         let recordCount = 0;
         const action = this.config.actions.lookup(name);
         if (action) {
@@ -403,35 +526,51 @@ export class SeedRunner<B extends DbBackend> {
     cascade: boolean,
     dryRun: boolean,
   ): Promise<string[]> {
+    return this.pruneInner(sudo, cascade, dryRun, undefined);
+  }
+
+  /** `prune` with explicit scope override (spec §9.5). */
+  async pruneWithScope(
+    sudo: boolean,
+    cascade: boolean,
+    dryRun: boolean,
+    scope: string,
+  ): Promise<string[]> {
+    return this.pruneInner(sudo, cascade, dryRun, scope);
+  }
+
+  private async pruneInner(
+    sudo: boolean,
+    cascade: boolean,
+    dryRun: boolean,
+    scopeOverride: string | undefined,
+  ): Promise<string[]> {
     if (!sudo && !dryRun) {
       throw SeedError.coded(
         "E_RESET_RESTRICTED",
         "seed prune requires --sudo (§11.2)",
       );
     }
-    await this.config.backend.setup();
-    const tracked = await this.config.backend.tracking().list();
+    const scope = this.effectiveScope(scopeOverride);
+    const backend = await this.setupResolved(scope);
+    const tracked = await backend.tracking().list();
     const orphans = tracked.filter((t) => !this.config.seeds.lookup(t.name));
     const names = orphans.map((t) => t.name);
     if (dryRun) return names;
 
     const holder = buildHolder(this.config.holderLabel);
-    const claim = await this.config.backend.lock().acquire(
-      "apply",
-      holder,
-      this.config.lockTtlMs,
-    );
+    const claim = await backend.lock().acquire("apply", holder, this.config.lockTtlMs);
     const guard = new LockGuard(
-      this.config.backend,
+      backend,
       claim,
       Math.max(1000, Math.floor(this.config.lockTtlMs / 3)),
     );
     try {
       for (const orphan of orphans) {
         if (cascade) {
-          await this.config.backend.deletePaths(orphan.pathsTouched);
+          await backend.deletePaths(orphan.pathsTouched);
         }
-        await this.config.backend.tracking().remove(orphan.name);
+        await backend.tracking().remove(orphan.name);
       }
     } finally {
       await guard.release();
@@ -440,8 +579,21 @@ export class SeedRunner<B extends DbBackend> {
   }
 
   async forceUnlock(verb: LockVerb): Promise<void> {
-    await this.config.backend.setup();
-    await this.config.backend.lock().forceUnlock(verb);
+    return this.forceUnlockInner(verb, undefined);
+  }
+
+  /** `forceUnlock` with explicit scope override (spec §9.5). */
+  async forceUnlockWithScope(verb: LockVerb, scope: string): Promise<void> {
+    return this.forceUnlockInner(verb, scope);
+  }
+
+  private async forceUnlockInner(
+    verb: LockVerb,
+    scopeOverride: string | undefined,
+  ): Promise<void> {
+    const scope = this.effectiveScope(scopeOverride);
+    const backend = await this.setupResolved(scope);
+    await backend.lock().forceUnlock(verb);
   }
 
   regenerate(_names: string[]): Promise<void> {
@@ -464,21 +616,24 @@ export class SeedRunner<B extends DbBackend> {
     names: string[],
     cascade: boolean,
     all: boolean,
+    scopeOverride: string | undefined,
   ): Promise<void> {
     const started = Date.now();
-    this.emit("info", "runner.starting", {
-      verb: "reset",
-      args: names,
-      format: "json",
-      backend: this.config.backend.name(),
-      scope_target: this.config.scopeTarget,
-      cascade,
-      all,
-    });
+    const scope = this.effectiveScope(scopeOverride);
 
     let result: { removed: number; skipped: number };
     try {
-      result = await this.dispatchResetInner(names, cascade, all);
+      const backend = await this.setupResolved(scope);
+      this.emit("info", "runner.starting", {
+        verb: "reset",
+        args: names,
+        format: "json",
+        backend: backend.name(),
+        scope_target: scope,
+        cascade,
+        all,
+      });
+      result = await this.dispatchResetInner(backend, scope, names, cascade, all);
     } catch (e) {
       const err = e instanceof SeedError ? e : undefined;
       this.emit("error", "runner.failed", {
@@ -499,6 +654,8 @@ export class SeedRunner<B extends DbBackend> {
   }
 
   private async dispatchResetInner(
+    backend: B,
+    _scope: string,
     names: string[],
     cascade: boolean,
     all: boolean,
@@ -507,9 +664,7 @@ export class SeedRunner<B extends DbBackend> {
       rejectProductionScope(this.config.seeds.lookup(name)!);
     }
 
-    await this.config.backend.setup();
-
-    const tracked = await this.config.backend.tracking().list();
+    const tracked = await backend.tracking().list();
     const appliedNames = new Set(tracked.map((t) => t.name));
     const trackedByName = new Map(tracked.map((t) => [t.name, t]));
 
@@ -586,13 +741,13 @@ export class SeedRunner<B extends DbBackend> {
 
     // §8.4: acquire apply-class lock — reset shares the slot.
     const holder = buildHolder(this.config.holderLabel);
-    const claim = await this.config.backend.lock().acquire(
+    const claim = await backend.lock().acquire(
       "apply",
       holder,
       this.config.lockTtlMs,
     );
     const guard = new LockGuard(
-      this.config.backend,
+      backend,
       claim,
       Math.max(1000, Math.floor(this.config.lockTtlMs / 3)),
     );
@@ -618,13 +773,13 @@ export class SeedRunner<B extends DbBackend> {
           name,
         );
         const seedStarted = Date.now();
-        const { deleted, missing } = await this.config.backend.deletePaths(
+        const { deleted, missing } = await backend.deletePaths(
           entry.pathsTouched,
         );
         for (const path of missing) {
           this.emit("warn", "seed.reset.path_missing", { path_key: path }, name);
         }
-        await this.config.backend.tracking().remove(name);
+        await backend.tracking().remove(name);
         this.emit(
           "info",
           "seed.reset.applied",
@@ -644,21 +799,27 @@ export class SeedRunner<B extends DbBackend> {
 
   // ────────────────── private apply orchestration ──────────────────
 
-  private async dispatch(verb: string, names: string[], force: boolean): Promise<void> {
+  private async dispatch(
+    verb: string,
+    names: string[],
+    force: boolean,
+    scopeOverride: string | undefined,
+  ): Promise<void> {
     const started = Date.now();
-    const backendName = this.config.backend.name();
-    this.emit("info", "runner.starting", {
-      verb,
-      args: names,
-      format: "json",
-      backend: backendName,
-      scope_target: this.config.scopeTarget,
-      force,
-    });
+    const scope = this.effectiveScope(scopeOverride);
 
     let result: { applied: number; skipped: number };
     try {
-      result = await this.dispatchInner(names, force);
+      const backend = await this.setupResolved(scope);
+      this.emit("info", "runner.starting", {
+        verb,
+        args: names,
+        format: "json",
+        backend: backend.name(),
+        scope_target: scope,
+        force,
+      });
+      result = await this.dispatchInner(backend, scope, names, force);
     } catch (e) {
       const err = e instanceof SeedError ? e : undefined;
       const code = err?.code ?? "E_INTERNAL";
@@ -680,6 +841,8 @@ export class SeedRunner<B extends DbBackend> {
   }
 
   private async dispatchInner(
+    backend: B,
+    scope: string,
     names: string[],
     force: boolean,
   ): Promise<{ applied: number; skipped: number }> {
@@ -697,30 +860,29 @@ export class SeedRunner<B extends DbBackend> {
     const targetSet =
       names.length === 0 ? new Set(topo) : new Set(names);
 
-    // §10: ensure tracking + lock storage exist before first read.
-    await this.config.backend.setup();
-
     // §8.4: acquire the apply-class advisory lock + heartbeat.
     const holder = buildHolder(this.config.holderLabel);
-    const claim = await this.config.backend.lock().acquire(
+    const claim = await backend.lock().acquire(
       "apply",
       holder,
       this.config.lockTtlMs,
     );
     const guard = new LockGuard(
-      this.config.backend,
+      backend,
       claim,
       Math.max(1000, Math.floor(this.config.lockTtlMs / 3)),
     );
 
     try {
-      return await this.applyLoop(topo, targetSet, force);
+      return await this.applyLoop(backend, scope, topo, targetSet, force);
     } finally {
       await guard.release();
     }
   }
 
   private async applyLoop(
+    backend: B,
+    scope: string,
     topo: string[],
     targetSet: Set<string>,
     force: boolean,
@@ -731,7 +893,7 @@ export class SeedRunner<B extends DbBackend> {
     // Snapshot existing tracking once. Mutates as we apply seeds —
     // drift skips short-circuit, ownership transfer (§8.2) moves
     // paths between entries.
-    const snapshot = await this.config.backend.tracking().list();
+    const snapshot = await backend.tracking().list();
     const trackedByName: Map<string, TrackingEntry> = new Map(
       snapshot.map((t) => [t.name, t]),
     );
@@ -740,16 +902,16 @@ export class SeedRunner<B extends DbBackend> {
       if (!targetSet.has(name)) continue;
       const seed = this.config.seeds.lookup(name)!;
 
-      // §9: scope gate.
+      // §9: scope gate (against the scope active for this dispatch).
       try {
-        checkScope(seed, this.config.scopeTarget);
+        checkScope(seed, scope);
       } catch (e) {
         this.emit(
           "error",
           "seed.scope_violation",
           {
             declared_scope: seed.scope,
-            actual_scope: this.config.scopeTarget,
+            actual_scope: scope,
           },
           name,
         );
@@ -824,9 +986,10 @@ export class SeedRunner<B extends DbBackend> {
       }
       for (const record of owned) {
         record.data = await this.resolveRefsIn(
+          backend,
           name,
           record.data,
-          this.config.backend.name(),
+          backend.name(),
           appliedPaths,
         );
       }
@@ -839,7 +1002,7 @@ export class SeedRunner<B extends DbBackend> {
           if (!data || typeof data !== "object") continue;
           if (!(unique.field in data)) continue;
           const value = (data as Record<string, unknown>)[unique.field];
-          const conflicts = await this.config.backend.findUniqueConflicts(
+          const conflicts = await backend.findUniqueConflicts(
             unique.path,
             unique.field,
             value,
@@ -890,7 +1053,7 @@ export class SeedRunner<B extends DbBackend> {
         key: w.key,
         data: w.data,
       }));
-      const writeResult = await this.config.backend.upsertBatch(writes);
+      const writeResult = await backend.upsertBatch(writes);
 
       // §10.1 / §17.3: paths_touched is canonically lex-sorted.
       const pathsTouched = Array.from(new Set(writeResult.pathsTouched)).sort();
@@ -899,7 +1062,7 @@ export class SeedRunner<B extends DbBackend> {
       // tracking entry that currently claims them.
       const donors = this.findDonors(name, pathsTouched, trackedByName);
       for (const [donorName, donorEntry] of donors) {
-        await this.config.backend.tracking().upsert(donorEntry);
+        await backend.tracking().upsert(donorEntry);
         trackedByName.set(donorName, donorEntry);
       }
       for (const [donorName, donorPath] of this.transferPairs(
@@ -925,7 +1088,7 @@ export class SeedRunner<B extends DbBackend> {
         specVersion: this.config.specVersion,
         trackingSchemaVersion: "1",
       };
-      await this.config.backend.tracking().upsert(entry);
+      await backend.tracking().upsert(entry);
       trackedByName.set(name, entry);
 
       this.emit(
@@ -944,7 +1107,38 @@ export class SeedRunner<B extends DbBackend> {
     return { applied, skipped };
   }
 
+  /**
+   * Spec §9.3 + §9.4: resolve the active scope to a backend, run
+   * `setup()` to provision tracking + lock storage, and cross-check
+   * the backend's self-reported scope against the requested one.
+   * Mismatch surfaces as `E_SCOPE_VIOLATION` *before any tracking
+   * write*. Backends that can't determine their scope return
+   * `undefined`; the cross-check is skipped in that case.
+   */
+  private async setupResolved(requestedScope: string): Promise<B> {
+    const backend = await this.config.resolveBackend(requestedScope);
+    await backend.setup();
+    const reported = await backend.scopeTarget();
+    if (reported !== undefined && requestedScope !== "" && requestedScope !== reported) {
+      throw SeedError.coded(
+        "E_SCOPE_VIOLATION",
+        `scope mismatch: requested ${JSON.stringify(requestedScope)}, but backend reports ${JSON.stringify(reported)} — likely a §9.3 registry misconfiguration`,
+      );
+    }
+    return backend;
+  }
+
+  /**
+   * Effective scope for this verb call: the per-call override per
+   * §9.5, or the ambient `SeedConfig.scopeTarget` if no override.
+   */
+  private effectiveScope(perCall: string | undefined): string {
+    if (perCall && perCall !== "") return perCall;
+    return this.config.scopeTarget;
+  }
+
   private async resolveRefsIn(
+    backend: B,
     seedName: string,
     value: unknown,
     backendName: string,
@@ -967,7 +1161,7 @@ export class SeedRunner<B extends DbBackend> {
         existence.set(cacheKey, true);
         continue;
       }
-      const exists = await this.config.backend.recordExists(r.table, r.key);
+      const exists = await backend.recordExists(r.table, r.key);
       existence.set(cacheKey, exists);
     }
     for (const [k, ok] of existence) {
