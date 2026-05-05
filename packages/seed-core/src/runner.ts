@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import {
   ScopedBackends,
   type DbBackend,
@@ -10,7 +12,16 @@ import {
   StdoutNdjsonEmitter,
   makeEvent,
 } from "./event.js";
-import { type GeneratorRegistry, PricingRegistry } from "./generator.js";
+import {
+  type CacheFile,
+  type CacheProvenance,
+  type GeneratorContext,
+  type GeneratorRegistry,
+  loadCacheFile,
+  PricingRegistry,
+  promptHash,
+  writeCanonicalCache,
+} from "./generator.js";
 import {
   type LockClaim,
   type LockHolder,
@@ -20,6 +31,7 @@ import { Registry } from "./registry.js";
 import {
   compile,
   registryToJson as registryToJsonImported,
+  validateRecord,
   type SchemaEntry,
   type SchemaRegistry,
 } from "./schema.js";
@@ -42,6 +54,16 @@ export interface CostCaps {
   perRunUsd?: number;
 }
 
+/** Summary returned by {@link SeedRunner.regenerate} (spec §17.6). */
+export interface RegenerateOutcome {
+  seedsProcessed: number;
+  recordCount: number;
+  droppedCount: number;
+  estimatedCostUsd: number;
+  actualCostUsd: number;
+  dryRun: boolean;
+}
+
 /** Spec §9.3 single-backend convenience options. */
 export interface SeedConfigOpts<B extends DbBackend> {
   /** Single already-constructed backend. Mutually exclusive with `backends`. */
@@ -52,6 +74,14 @@ export interface SeedConfigOpts<B extends DbBackend> {
   lockTtlMs?: number;
   generatorTimeoutMs?: number;
   validationThreshold?: number;
+  /**
+   * Root directory for generator cache files (spec §17.2/§17.3).
+   * `seed regenerate` writes
+   * `<cacheDir>/<seed-name>/data/<batch-name>.cached.json`. Apply-side
+   * loading of generator-backed batches reads from here. Defaults to
+   * `./.seed-cache`.
+   */
+  cacheDir?: string;
   costCaps?: CostCaps;
   emitter?: EventEmitter;
   specVersion?: string;
@@ -73,6 +103,7 @@ export class SeedConfig<B extends DbBackend> {
   lockTtlMs: number;
   generatorTimeoutMs: number;
   validationThreshold: number;
+  cacheDir: string;
   costCaps: CostCaps;
   emitter: EventEmitter;
   specVersion: string;
@@ -95,6 +126,7 @@ export class SeedConfig<B extends DbBackend> {
     this.lockTtlMs = opts.lockTtlMs ?? 5 * 60 * 1000;
     this.generatorTimeoutMs = opts.generatorTimeoutMs ?? 60 * 1000;
     this.validationThreshold = opts.validationThreshold ?? 0.2;
+    this.cacheDir = opts.cacheDir ?? ".seed-cache";
     this.costCaps = opts.costCaps ?? {};
     this.emitter = opts.emitter ?? new StdoutNdjsonEmitter();
     this.specVersion = opts.specVersion ?? "0.4.3";
@@ -278,6 +310,29 @@ function buildHolder(label: string): LockHolder {
     pid: process.pid,
     label,
   };
+}
+
+/**
+ * Race a promise against a hard timeout. If `body` doesn't settle
+ * before `timeoutMs`, reject with the error returned by `onTimeout`.
+ * The body promise is left to resolve in the background — we don't
+ * have AbortController plumbed through every generator, but the
+ * caller is responsible for not relying on its result.
+ */
+async function runWithTimeout<T>(
+  body: () => Promise<T>,
+  timeoutMs: number,
+  onTimeout: () => Error,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(onTimeout()), timeoutMs);
+  });
+  try {
+    return await Promise.race([body(), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /** Public seed runner. Drives every spec verb. */
@@ -596,13 +651,375 @@ export class SeedRunner<B extends DbBackend> {
     await backend.lock().forceUnlock(verb);
   }
 
-  regenerate(_names: string[]): Promise<void> {
-    return Promise.reject(
-      SeedError.coded(
-        "E_INTERNAL",
-        "SeedRunner.regenerate not yet implemented (T12)",
-      ),
-    );
+  /**
+   * Regenerate cache files for seeds with declared generators
+   * (spec §17.6). Walks each seed's `generators` map, enforces the
+   * per-seed and per-run cost caps, invokes the generator under a
+   * hard timeout, validates records against the registered schema,
+   * drops failures (aborting if drop ratio > threshold), and writes
+   * the canonical cache file at
+   * `<cacheDir>/<seed-name>/data/<batch-name>.cached.json`.
+   *
+   * Empty `names` ⇒ regenerate every seed with at least one
+   * generator declared. `dryRun=true` skips invocation/write —
+   * emits `seed.generator.invoked` with the estimated cost so the
+   * operator sees the plan without paying.
+   */
+  async regenerate(
+    names: string[],
+    dryRun: boolean = false,
+  ): Promise<RegenerateOutcome> {
+    const started = Date.now();
+    this.emit("info", "runner.starting", {
+      verb: "regenerate",
+      args: names,
+      dry_run: dryRun,
+    });
+
+    const cacheDir = this.config.cacheDir;
+
+    // Pick the target seed set.
+    let targets: string[];
+    if (names.length === 0) {
+      targets = this.config.seeds.names().filter((n) => {
+        const s = this.config.seeds.lookup(n);
+        return s && s.generators && Object.keys(s.generators).length > 0;
+      });
+    } else {
+      for (const n of names) {
+        if (!this.config.seeds.lookup(n)) {
+          throw SeedError.coded(
+            "E_INTERNAL",
+            `regenerate: seed ${JSON.stringify(n)} not registered`,
+          );
+        }
+      }
+      targets = names;
+    }
+
+    let totalActualCost = 0;
+    let totalEstimatedCost = 0;
+    let totalRecordCount = 0;
+    let totalDroppedCount = 0;
+
+    for (const name of targets) {
+      const seed = this.config.seeds.lookup(name)!;
+      const bindings = seed.generators ?? {};
+      if (Object.keys(bindings).length === 0) {
+        this.emit("info", "seed.generator.skipped", {
+          seed: name,
+          reason: "no generators declared",
+        });
+        continue;
+      }
+
+      for (const [batchName, binding] of Object.entries(bindings)) {
+        const generator = this.config.generators.lookup(binding.generator);
+        if (!generator) {
+          throw SeedError.coded(
+            "E_GENERATOR_NOT_FOUND",
+            `seed ${JSON.stringify(name)} batch ${JSON.stringify(batchName)}: generator ${JSON.stringify(binding.generator)} not registered`,
+          );
+        }
+        const schemaEntry = this.config.schemas.lookup(binding.schema);
+        if (!schemaEntry) {
+          throw SeedError.coded(
+            "E_SCHEMA_NOT_FOUND",
+            `seed ${JSON.stringify(name)} batch ${JSON.stringify(batchName)}: schema ${JSON.stringify(binding.schema)} not registered`,
+          );
+        }
+
+        const timeoutMs = binding.timeoutMs ?? this.config.generatorTimeoutMs;
+        const validationThreshold =
+          binding.validationThreshold ?? this.config.validationThreshold;
+
+        const ctx: GeneratorContext = {
+          schemaName: binding.schema,
+          schema: schemaEntry,
+          prompt: binding.prompt,
+          maxRecords: binding.maxRecords,
+          maxTokens: binding.maxTokens,
+          timeoutMs,
+          validationThreshold,
+          params: binding.params,
+        };
+
+        const estimated = generator.estimateCost(ctx);
+        if (
+          estimated !== undefined &&
+          this.config.costCaps.perSeedUsd !== undefined &&
+          estimated > this.config.costCaps.perSeedUsd
+        ) {
+          throw SeedError.coded(
+            "E_GENERATOR_BUDGET_EXCEEDED",
+            `seed ${JSON.stringify(name)} batch ${JSON.stringify(batchName)}: estimated $${estimated.toFixed(4)} exceeds per-seed cap $${this.config.costCaps.perSeedUsd.toFixed(4)}`,
+          );
+        }
+        if (
+          estimated !== undefined &&
+          this.config.costCaps.perRunUsd !== undefined &&
+          totalEstimatedCost + estimated > this.config.costCaps.perRunUsd
+        ) {
+          throw SeedError.coded(
+            "E_GENERATOR_BUDGET_EXCEEDED",
+            `regenerate: cumulative estimated $${(totalEstimatedCost + estimated).toFixed(4)} would exceed per-run cap $${this.config.costCaps.perRunUsd.toFixed(4)}`,
+          );
+        }
+        if (estimated !== undefined) totalEstimatedCost += estimated;
+
+        const paramsModel =
+          binding.params && typeof binding.params === "object"
+            ? (binding.params as Record<string, unknown>)["model"]
+            : undefined;
+        this.emit("info", "seed.generator.invoked", {
+          seed: name,
+          batch: batchName,
+          generator: binding.generator,
+          schema: binding.schema,
+          model: paramsModel,
+          estimated_cost_usd: estimated,
+          dry_run: dryRun,
+        });
+
+        if (dryRun) continue;
+
+        // Hard timeout on the generator call.
+        const output = await runWithTimeout(
+          () => generator.generate(ctx),
+          timeoutMs,
+          () => {
+            const msg = `seed ${JSON.stringify(name)} batch ${JSON.stringify(batchName)}: generator ${JSON.stringify(binding.generator)} timed out after ${timeoutMs}ms`;
+            this.emit("error", "seed.generator.failed", {
+              seed: name,
+              batch: batchName,
+              error_code: "E_GENERATOR_TIMEOUT",
+              message: msg,
+            });
+            return SeedError.coded("E_GENERATOR_TIMEOUT", msg);
+          },
+        ).catch((e: unknown) => {
+          if (e instanceof SeedError) throw e;
+          const coded = SeedError.coded(
+            "E_GENERATOR_FAILED",
+            `seed ${JSON.stringify(name)} batch ${JSON.stringify(batchName)}: ${(e as Error).message}`,
+            e,
+          );
+          this.emit("error", "seed.generator.failed", {
+            seed: name,
+            batch: batchName,
+            error_code: "E_GENERATOR_FAILED",
+            message: coded.message,
+          });
+          throw coded;
+        });
+
+        // Schema-validate every record. Drop failures; abort if too
+        // many were dropped (§17.4).
+        const accepted: unknown[] = [];
+        let dropped = output.droppedCount;
+        for (let idx = 0; idx < output.records.length; idx++) {
+          const rec = output.records[idx];
+          try {
+            validateRecord(schemaEntry, rec);
+            accepted.push(rec);
+          } catch (e) {
+            dropped += 1;
+            this.emit("warn", "seed.generator.record_dropped", {
+              seed: name,
+              batch: batchName,
+              record_index: idx,
+              reason: (e as Error).message,
+            });
+          }
+        }
+
+        const totalRecords = accepted.length + dropped;
+        const dropRatio = totalRecords === 0 ? 0 : dropped / totalRecords;
+        if (dropRatio > validationThreshold) {
+          const msg = `seed ${JSON.stringify(name)} batch ${JSON.stringify(batchName)}: ${dropped}/${totalRecords} records failed validation (ratio ${dropRatio.toFixed(3)} > threshold ${validationThreshold.toFixed(3)})`;
+          this.emit("error", "seed.generator.failed", {
+            seed: name,
+            batch: batchName,
+            error_code: "E_GENERATOR_FAILED",
+            message: msg,
+          });
+          throw SeedError.coded("E_GENERATOR_FAILED", msg);
+        }
+
+        const provenance: CacheProvenance = {
+          name: binding.generator,
+          schema: binding.schema,
+          schema_version: schemaEntry.version,
+          model: typeof paramsModel === "string" ? paramsModel : undefined,
+          prompt_hash: promptHash(binding.prompt),
+          generated_at: new Date().toISOString(),
+          record_count: accepted.length,
+          tokens: output.tokens,
+        };
+        const file: CacheFile = { generator: provenance, data: accepted };
+        const bytes = writeCanonicalCache(file);
+
+        const dir = path.join(cacheDir, name, "data");
+        try {
+          fs.mkdirSync(dir, { recursive: true });
+        } catch (e) {
+          throw SeedError.coded(
+            "E_INTERNAL",
+            `regenerate: create cache dir ${JSON.stringify(dir)}: ${(e as Error).message}`,
+          );
+        }
+        const filePath = path.join(dir, `${batchName}.cached.json`);
+        try {
+          fs.writeFileSync(filePath, bytes);
+        } catch (e) {
+          throw SeedError.coded(
+            "E_INTERNAL",
+            `regenerate: write cache ${JSON.stringify(filePath)}: ${(e as Error).message}`,
+          );
+        }
+
+        if (output.actualCostUsd !== undefined) {
+          totalActualCost += output.actualCostUsd;
+        }
+        totalRecordCount += accepted.length;
+        totalDroppedCount += dropped;
+
+        this.emit("info", "seed.generator.completed", {
+          seed: name,
+          batch: batchName,
+          generator: binding.generator,
+          record_count: accepted.length,
+          dropped_count: dropped,
+          tokens: output.tokens,
+          actual_cost_usd: output.actualCostUsd,
+          cache_path: filePath,
+        });
+      }
+    }
+
+    this.emit("info", "runner.completed", {
+      verb: "regenerate",
+      duration_ms: Date.now() - started,
+      seed_count: targets.length,
+      record_count: totalRecordCount,
+      dropped_count: totalDroppedCount,
+      actual_cost_usd: totalActualCost,
+      estimated_cost_usd: totalEstimatedCost,
+      dry_run: dryRun,
+    });
+
+    return {
+      seedsProcessed: targets.length,
+      recordCount: totalRecordCount,
+      droppedCount: totalDroppedCount,
+      estimatedCostUsd: totalEstimatedCost,
+      actualCostUsd: totalActualCost,
+      dryRun,
+    };
+  }
+
+  /**
+   * Apply-side cache check (spec §17.5/§17.7). For every
+   * generator-backed batch on `seed`, ensure:
+   *   - the cache file exists and parses,
+   *   - cached `$generator.schema_version` matches the schema's
+   *     current version in the registry,
+   *   - cached `$generator.prompt_hash` matches the canonical hash
+   *     of the binding's current prompt.
+   *
+   * Mismatches emit `seed.generator.cache_stale` (warn) and abort
+   * with `E_GENERATOR_FAILED`. Successful checks emit
+   * `seed.generator.cache_hit` with `cache_age_days` so operators
+   * can spot caches that drifted *behind* the prompt's intent.
+   */
+  private checkGeneratorCaches(seed: Seed): void {
+    const bindings = seed.generators ?? {};
+    if (Object.keys(bindings).length === 0) return;
+
+    const cacheDir = this.config.cacheDir;
+    for (const [batchName, binding] of Object.entries(bindings)) {
+      let cache: CacheFile;
+      try {
+        cache = loadCacheFile(cacheDir, seed.name, batchName);
+      } catch (e) {
+        this.emit(
+          "warn",
+          "seed.generator.cache_stale",
+          {
+            batch: batchName,
+            reason: "cache_missing",
+            message: (e as Error).message,
+          },
+          seed.name,
+        );
+        throw e;
+      }
+
+      // §17.5: schema-version check.
+      const currentSchema = this.config.schemas.lookup(binding.schema);
+      if (!currentSchema) {
+        throw SeedError.coded(
+          "E_SCHEMA_NOT_FOUND",
+          `seed ${JSON.stringify(seed.name)} batch ${JSON.stringify(batchName)}: schema ${JSON.stringify(binding.schema)} not registered`,
+        );
+      }
+      if (cache.generator.schema_version !== currentSchema.version) {
+        this.emit(
+          "warn",
+          "seed.generator.cache_stale",
+          {
+            batch: batchName,
+            reason: "schema_bumped",
+            cache_schema_version: cache.generator.schema_version,
+            current_schema_version: currentSchema.version,
+          },
+          seed.name,
+        );
+        throw SeedError.coded(
+          "E_GENERATOR_FAILED",
+          `seed ${JSON.stringify(seed.name)} batch ${JSON.stringify(batchName)}: cache schema_version ${JSON.stringify(cache.generator.schema_version)} != current ${JSON.stringify(currentSchema.version)}; run \`seed regenerate ${seed.name}\``,
+        );
+      }
+
+      // §17.7: prompt-hash check.
+      const currentPromptHash = promptHash(binding.prompt);
+      if (cache.generator.prompt_hash !== currentPromptHash) {
+        this.emit(
+          "warn",
+          "seed.generator.cache_stale",
+          {
+            batch: batchName,
+            reason: "prompt_changed",
+            cache_prompt_hash: cache.generator.prompt_hash,
+            current_prompt_hash: currentPromptHash,
+          },
+          seed.name,
+        );
+        throw SeedError.coded(
+          "E_GENERATOR_FAILED",
+          `seed ${JSON.stringify(seed.name)} batch ${JSON.stringify(batchName)}: cached prompt_hash != current; the seed's prompt was edited since the cache was generated. Run \`seed regenerate ${seed.name}\` and review the diff.`,
+        );
+      }
+
+      // Both checks passed — emit cache_hit with age so operators
+      // can spot caches that valid but drifting behind intent.
+      const generatedAt = Date.parse(cache.generator.generated_at);
+      const ageDays = Number.isFinite(generatedAt)
+        ? Math.max(0, Math.floor((Date.now() - generatedAt) / 86_400_000))
+        : null;
+      this.emit(
+        "info",
+        "seed.generator.cache_hit",
+        {
+          batch: batchName,
+          record_count: cache.generator.record_count,
+          cache_age_days: ageDays,
+          generator: cache.generator.name,
+          model: cache.generator.model ?? null,
+        },
+        seed.name,
+      );
+    }
   }
 
   /** Spec §11.1 + §16.7: emit the schema registry as canonical JSON. */
@@ -946,6 +1363,11 @@ export class SeedRunner<B extends DbBackend> {
         name,
       );
       const seedStarted = Date.now();
+
+      // §17.5/§17.7: cache freshness check for generator-backed
+      // batches. Bails before running the action if any cache is
+      // stale or missing.
+      this.checkGeneratorCaches(seed);
 
       // Run the seed's action (if registered) to produce writes.
       const action = this.config.actions.lookup(name);

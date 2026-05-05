@@ -16,6 +16,7 @@ export * from "./seed.js";
 export * from "./schema.js";
 export * from "./transformer.js";
 export * from "./generator.js";
+export * from "./llm.js";
 export * from "./tracking.js";
 export * from "./lock.js";
 export * from "./backend.js";

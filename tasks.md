@@ -111,16 +111,17 @@ trackable side-by-side. Sibling reference: `rust-workspace/lib-seed-core/tasks.m
 ### P2 — Post-MVP / Near-term
 
 #### T12 — Generator + cache pipeline (§17)
-- [ ] `T12.1` Hard-timeout enforcement via `AbortController` → `E_GENERATOR_TIMEOUT`
-- [ ] `T12.2` Cost cap pre-flight → `E_GENERATOR_BUDGET_EXCEEDED`
-- [ ] `T12.3` Validation threshold (default 0.20)
-- [ ] `T12.4` Cache file writer with canonical formatting (§17.3)
-- [ ] `T12.5` Cache file reader / `loadGenerated`
-- [ ] `T12.6` Cache staleness on schema bump
-- [ ] `T12.7` `prompt_hash` change detection
-- [ ] `T12.8` `seed regenerate` verb body
-- [ ] `T12.9` Generator events catalog
-- [ ] `T12.10` `PricingRegistry.estimate` wired into LLM pricing path
+- [x] `T12.1` Hard-timeout enforcement via `runWithTimeout` → `E_GENERATOR_TIMEOUT`
+- [x] `T12.2` Cost cap pre-flight → `E_GENERATOR_BUDGET_EXCEEDED`
+- [x] `T12.3` Validation threshold (default 0.20)
+- [x] `T12.4` Cache file writer with canonical formatting (§17.3) — byte-parity fixture asserts identical bytes to Rust
+- [x] `T12.5` Cache file reader / `loadGeneratedCache`
+- [x] `T12.6` Cache staleness on schema bump
+- [x] `T12.7` `prompt_hash` change detection
+- [x] `T12.8` `seed regenerate` verb body
+- [x] `T12.9` Generator events catalog (invoked / completed / failed / record_dropped / cache_hit / cache_stale / skipped)
+- [x] `T12.10` `PricingRegistry.estimate` wired into `LlmGenerator.estimateCost` + `actualCostUsd`
+- [x] `T12.11` `LlmProvider` interface + `LlmGenerator` (schema-via-system-prompt; multi-provider via user impls)
 
 #### T13 — Runner-context API (§11.6)
 - [ ] `T13.1` `ctx.upsert(path, key, data) → Ref<T>`

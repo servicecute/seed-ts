@@ -32,8 +32,45 @@ export interface Seed {
   requires: string[];
   /** Optional declarative constraints (§13.4). */
   constraints?: ConstraintHints;
+  /**
+   * Generator-backed batches for this seed (spec §17.10). Key is the
+   * batch name; value declares the generator + prompt + caps. Empty
+   * (omitted) for hand-authored seeds. The runner walks each entry
+   * during `seed regenerate` and writes the cache file at
+   * `<cacheDir>/<seed-name>/data/<batch-name>.cached.json`.
+   */
+  generators?: Record<string, GeneratorBinding>;
   /** Canonical content hash for drift detection (§10.3). */
   keyHash: string;
+}
+
+/**
+ * Per-seed declaration that one batch of records is produced by a
+ * generator (LLM, faker, csv, …) instead of authored by hand
+ * (spec §17.10).
+ *
+ * Mirrors the Rust `GeneratorBinding`. Field names on the wire match
+ * camelCase TS conventions; the cache file's `$generator` block uses
+ * snake_case for cross-language portability (see `writeCanonicalCache`
+ * in `generator.ts`).
+ */
+export interface GeneratorBinding {
+  /** Name registered in the generator registry. `E_GENERATOR_NOT_FOUND` if missing at regenerate time. */
+  generator: string;
+  /** Schema name from the schemas registry the records will validate against. */
+  schema: string;
+  /** Prompt / input text. The runner hashes this for cache-stale detection (§17.7). */
+  prompt: string;
+  /** Hard cap on records the generator may emit per call. */
+  maxRecords: number;
+  /** LLM-only: hard cap on tokens per call. */
+  maxTokens?: number;
+  /** Per-binding override for the hard timeout. Resolves per-binding → runner → 60_000 ms (§17.4). */
+  timeoutMs?: number;
+  /** Per-binding override for the validation drop ratio (0..1). Resolves per-binding → runner → 0.20 (§17.4). */
+  validationThreshold?: number;
+  /** Generator-specific knobs (LLM `model`/`temperature`, CSV path, …). */
+  params?: unknown;
 }
 
 /** SHA-256 of arbitrary input. */
