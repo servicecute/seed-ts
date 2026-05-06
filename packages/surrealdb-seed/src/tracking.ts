@@ -1,5 +1,6 @@
 import {
   SeedError,
+  type TrackedIdentity,
   type Tracking,
   type TrackingEntry,
 } from "@servicecute/seed-core";
@@ -23,11 +24,16 @@ interface SeedRow {
   paths_touched: string[];
   tracking_schema_version: string;
   spec_version: string;
+  /** Auth-side identities the seed minted (proposed §25). Stored as
+   * a typed array; the SurrealDB schema is SCHEMALESS for this row
+   * so older rows that pre-date the field deserialise with this as
+   * `undefined`. */
+  created_identities?: TrackedIdentity[];
 }
 
 function toRow(entry: TrackingEntry): SeedRow {
   // Runner sorts paths_touched before calling upsert (T9.1).
-  return {
+  const row: SeedRow = {
     name: entry.name,
     applied_at: new Date(entry.appliedAt),
     key_hash: entry.keyHash,
@@ -36,6 +42,10 @@ function toRow(entry: TrackingEntry): SeedRow {
     tracking_schema_version: entry.trackingSchemaVersion,
     spec_version: entry.specVersion,
   };
+  if (entry.createdIdentities && entry.createdIdentities.length > 0) {
+    row.created_identities = entry.createdIdentities;
+  }
+  return row;
 }
 
 function fromRow(row: SeedRow): TrackingEntry {
@@ -43,7 +53,7 @@ function fromRow(row: SeedRow): TrackingEntry {
     row.applied_at instanceof Date
       ? row.applied_at.toISOString()
       : new Date(row.applied_at as unknown as string).toISOString();
-  return {
+  const entry: TrackingEntry = {
     name: row.name,
     keyHash: row.key_hash,
     scope: Array.isArray(row.scope) ? row.scope : [],
@@ -54,6 +64,10 @@ function fromRow(row: SeedRow): TrackingEntry {
       ? row.tracking_schema_version
       : "1",
   };
+  if (Array.isArray(row.created_identities) && row.created_identities.length > 0) {
+    entry.createdIdentities = row.created_identities;
+  }
+  return entry;
 }
 
 export class SurrealTracking implements Tracking {

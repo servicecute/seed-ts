@@ -12,11 +12,32 @@ export interface SeedKey {
 export interface ConstraintHints {
   unique?: FieldRef[];
   notNull?: FieldRef[];
+  /**
+   * Foreign-key declarations (§13.4 extension). The runner pre-
+   * validates each at write time using `recordExists` — catches
+   * typo'd uids in id-typed fields that weren't authored as
+   * `$ref` markers. Empty/omitted = no FK enforcement.
+   */
+  foreignKey?: ForeignKeyHint[];
 }
 
 export interface FieldRef {
   path: string;
   field: string;
+}
+
+/**
+ * Foreign-key declaration: `path.field` must contain a doc key that
+ * exists in the `references` table at apply time. The runner checks
+ * each non-null value via `DbBackend.recordExists` and surfaces
+ * violations as `E_CONSTRAINT_FK`. Targets just-written in the same
+ * run pass via `paths_touched`. Compound foreign keys are out of
+ * scope — declare one FK per physical field.
+ */
+export interface ForeignKeyHint {
+  path: string;
+  field: string;
+  references: string;
 }
 
 /** Declarative shape of a seed (spec §4, §13.4, §14.5, §16.5). */
@@ -40,6 +61,17 @@ export interface Seed {
    * `<cacheDir>/<seed-name>/data/<batch-name>.cached.json`.
    */
   generators?: Record<string, GeneratorBinding>;
+  /**
+   * Identity bindings (proposed spec §25) — pair seeded data with
+   * auth-side identities. Empty/omitted for seeds that don't touch
+   * auth. Each entry declares an `IdentityBinding` (see
+   * `./identity.ts`) that the runner resolves via the
+   * `IdentityProviderRegistry` during apply, minting the uid before
+   * the data write and tearing it down on reset. The whole identity
+   * path is a no-op when this is empty AND no providers are
+   * registered.
+   */
+  identities?: Record<string, import("./identity.js").IdentityBinding>;
   /** Canonical content hash for drift detection (§10.3). */
   keyHash: string;
 }
@@ -207,11 +239,59 @@ export function topologicalOrder(registry: SeedRegistry): string[] {
  */
 export const REF_MARKER_KEY = "$ref";
 
+/**
+ * What a `$ref` marker is asking the runner to resolve (spec §7.1).
+ *
+ * - `key`: direct lookup by doc key — historical default. Wire form
+ *   is the path string (`table/key` Firestore, `table:key`
+ *   SurrealDB).
+ * - `field`: lookup by an indexed natural-key field (`email`,
+ *   `slug`, …). Wire form is the bare resolved doc key —
+ *   for id-typed fields that store the target's doc key verbatim.
+ *   `{table, email}` is sugar for `{field: "email"}` (§25.8).
+ */
+export type RefTarget =
+  | { kind: "key"; table: string; key: string }
+  | { kind: "field"; table: string; field: string; value: string };
+
+/** Build a `{$ref: {table, key}}` marker (path-typed wire form). */
 export function refMarker(table: string, key: string): unknown {
   return { [REF_MARKER_KEY]: { table, key } };
 }
 
-export function asRefMarker(value: unknown): { table: string; key: string } | undefined {
+/**
+ * Build a `{$ref: {table, field, value}}` marker. Use for natural-key
+ * cross-seed references — `email`, `slug`, `code`, `isbn`, … —
+ * resolved via `DbBackend.findKeyByField` at apply time. Wire form
+ * is the bare resolved key string.
+ */
+export function refMarkerByField(
+  table: string,
+  field: string,
+  value: string,
+): unknown {
+  return { [REF_MARKER_KEY]: { table, field, value } };
+}
+
+/**
+ * Sugar for {@link refMarkerByField} with `field: "email"` — emits
+ * the documented 2-field shape `{table, email}` which the parser
+ * desugars on read.
+ */
+export function refMarkerByEmail(table: string, email: string): unknown {
+  return { [REF_MARKER_KEY]: { table, email } };
+}
+
+/**
+ * Recognise a JSON object as a `$ref` marker (spec §7.1).
+ * Accepted shapes:
+ * - `{$ref: {table, key}}`               → `{kind: "key"}`
+ * - `{$ref: {table, field, value}}`      → `{kind: "field"}`
+ * - `{$ref: {table, email}}`             → `{kind: "field", field: "email"}`
+ *   (documented sugar — other natural-key fields use the explicit
+ *   3-field form)
+ */
+export function asRefMarker(value: unknown): RefTarget | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return undefined;
   }
@@ -219,11 +299,30 @@ export function asRefMarker(value: unknown): { table: string; key: string } | un
   const keys = Object.keys(obj);
   if (keys.length !== 1 || !keys.includes(REF_MARKER_KEY)) return undefined;
   const inner = obj[REF_MARKER_KEY];
-  if (typeof inner !== "object" || inner === null || Array.isArray(inner)) return undefined;
+  if (typeof inner !== "object" || inner === null || Array.isArray(inner)) {
+    return undefined;
+  }
   const innerObj = inner as Record<string, unknown>;
-  if (Object.keys(innerObj).length !== 2) return undefined;
   const table = innerObj["table"];
-  const key = innerObj["key"];
-  if (typeof table !== "string" || typeof key !== "string") return undefined;
-  return { table, key };
+  if (typeof table !== "string") return undefined;
+
+  switch (Object.keys(innerObj).length) {
+    case 2: {
+      const k = innerObj["key"];
+      if (typeof k === "string") return { kind: "key", table, key: k };
+      const e = innerObj["email"];
+      if (typeof e === "string") {
+        return { kind: "field", table, field: "email", value: e };
+      }
+      return undefined;
+    }
+    case 3: {
+      const f = innerObj["field"];
+      const v = innerObj["value"];
+      if (typeof f !== "string" || typeof v !== "string") return undefined;
+      return { kind: "field", table, field: f, value: v };
+    }
+    default:
+      return undefined;
+  }
 }

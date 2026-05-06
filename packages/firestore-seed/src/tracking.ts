@@ -1,5 +1,6 @@
 import {
   SeedError,
+  type TrackedIdentity,
   type Tracking,
   type TrackingEntry,
 } from "@servicecute/seed-core";
@@ -31,10 +32,13 @@ interface SeedDoc {
   paths_touched: string[];
   tracking_schema_version: string;
   spec_version: string;
+  /** Auth-side identities the seed minted (proposed §25). Omitted
+   * when empty — backwards-compat for docs written before §25. */
+  created_identities?: TrackedIdentity[];
 }
 
 function toDoc(entry: TrackingEntry): SeedDoc {
-  return {
+  const out: SeedDoc = {
     _kind: KIND_TRACKING,
     name: entry.name,
     applied_at_ms: new Date(entry.appliedAt).getTime(),
@@ -44,10 +48,14 @@ function toDoc(entry: TrackingEntry): SeedDoc {
     tracking_schema_version: entry.trackingSchemaVersion,
     spec_version: entry.specVersion,
   };
+  if (entry.createdIdentities && entry.createdIdentities.length > 0) {
+    out.created_identities = entry.createdIdentities;
+  }
+  return out;
 }
 
 function fromDoc(doc: Partial<SeedDoc>): TrackingEntry {
-  return {
+  const entry: TrackingEntry = {
     name: doc.name ?? "",
     keyHash: doc.key_hash ?? "",
     scope: Array.isArray(doc.scope) ? doc.scope : [],
@@ -58,6 +66,10 @@ function fromDoc(doc: Partial<SeedDoc>): TrackingEntry {
       ? doc.tracking_schema_version
       : "1",
   };
+  if (Array.isArray(doc.created_identities) && doc.created_identities.length > 0) {
+    entry.createdIdentities = doc.created_identities;
+  }
+  return entry;
 }
 
 export class FirestoreTracking implements Tracking {

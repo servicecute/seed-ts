@@ -8,6 +8,14 @@ export interface TrackingEntry {
   appliedAt: string;
   specVersion: string;
   trackingSchemaVersion: string;
+  /**
+   * Auth-side identities the runner minted for this seed (proposed
+   * spec §25). Reset uses this to tear identities down after the
+   * data is gone. Empty/omitted for seeds that don't touch auth and
+   * for tracking rows written by older runners that didn't know
+   * about §25.
+   */
+  createdIdentities?: import("./identity.js").TrackedIdentity[];
 }
 
 /**

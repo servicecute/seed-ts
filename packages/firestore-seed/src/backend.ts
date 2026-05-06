@@ -132,6 +132,31 @@ export class FirestoreBackend implements DbBackend {
     }
   }
 
+  async findKeyByField(
+    table: string,
+    field: string,
+    value: unknown,
+  ): Promise<string | undefined> {
+    try {
+      const snap = await this.db
+        .collection(table)
+        .where(field, "==", value as never)
+        .limit(1)
+        .get();
+      let id: string | undefined;
+      snap.forEach((d) => {
+        if (id === undefined) id = d.id;
+      });
+      return id;
+    } catch (e) {
+      throw SeedError.coded(
+        "E_INTERNAL",
+        `findKeyByField query for ${table}/${field}: ${(e as Error).message}`,
+        e,
+      );
+    }
+  }
+
   async findUniqueConflicts(
     table: string,
     field: string,

@@ -157,6 +157,37 @@ export class SurrealBackend implements DbBackend {
     }
   }
 
+  async findKeyByField(
+    table: string,
+    field: string,
+    value: unknown,
+  ): Promise<string | undefined> {
+    // Same identifier-safety rule as findUniqueConflicts — field
+    // names are spliced into the SELECT, so reject anything that
+    // isn't a plain identifier.
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(field)) {
+      throw SeedError.coded(
+        "E_INTERNAL",
+        `findKeyByField: refusing to splice non-identifier field name ${JSON.stringify(field)}`,
+      );
+    }
+    type Row = { id: string };
+    try {
+      const result = await this.db.query<[Row[]]>(
+        `SELECT meta::id(id) AS id FROM type::table($t) WHERE ${field} = $v LIMIT 1`,
+        { t: table, v: value },
+      );
+      const rows = result[0] ?? [];
+      return rows[0]?.id;
+    } catch (e) {
+      throw SeedError.coded(
+        "E_INTERNAL",
+        `findKeyByField query on ${table}.${field}: ${(e as Error).message}`,
+        e,
+      );
+    }
+  }
+
   async findUniqueConflicts(
     table: string,
     field: string,

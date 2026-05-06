@@ -7,6 +7,15 @@ import {
 } from "./backend.js";
 import { SeedError } from "./error.js";
 import {
+  type IdentityBinding,
+  type IdentityProvider,
+  type IdentityProviderRegistry,
+  type TrackedIdentity,
+  IdentityError,
+  getJsonPointer,
+  setJsonPointer,
+} from "./identity.js";
+import {
   type EventEmitter,
   type EventLevel,
   StdoutNdjsonEmitter,
@@ -39,6 +48,7 @@ import {
   asRefMarker,
   topologicalOrder,
   type OwnedWrite,
+  type RefTarget,
   type Seed,
   type SeedActionRegistry,
   type SeedRegistry,
@@ -98,6 +108,9 @@ export class SeedConfig<B extends DbBackend> {
   readonly schemas: SchemaRegistry = new Registry<SchemaEntry>();
   readonly transformers: TransformerRegistry = new Registry();
   readonly generators: GeneratorRegistry = new Registry();
+  /** Identity providers (proposed §25). Empty by default — non-auth
+   * seeds never touch this registry. */
+  readonly identityProviders: IdentityProviderRegistry = new Registry();
   readonly pricing: PricingRegistry = new PricingRegistry();
   scopeTarget: string;
   lockTtlMs: number;
@@ -1197,6 +1210,17 @@ export class SeedRunner<B extends DbBackend> {
           this.emit("warn", "seed.reset.path_missing", { path_key: path }, name);
         }
         await backend.tracking().remove(name);
+
+        // §25: tear down auth-side identities the seed minted. Data
+        // is already gone — orphan identities are warned (operator
+        // cleans up) but never abort the reset.
+        if (entry.createdIdentities && entry.createdIdentities.length > 0) {
+          const uids: Array<[string, string]> = entry.createdIdentities.map(
+            (t) => [t.provider, t.uid],
+          );
+          await this.tearDownIdentities(name, uids, /*phase*/ "reset");
+        }
+
         this.emit(
           "info",
           "seed.reset.applied",
@@ -1371,7 +1395,22 @@ export class SeedRunner<B extends DbBackend> {
 
       // Run the seed's action (if registered) to produce writes.
       const action = this.config.actions.lookup(name);
-      const raw: OwnedWrite[] = action ? await action.produce() : [];
+      const rawProduced: OwnedWrite[] = action ? await action.produce() : [];
+
+      // §25: identity binding resolution. Mints (or looks up) auth
+      // identities BEFORE the data write and patches each record's
+      // uid_targets. When `keyFromUid` is set, also replaces the
+      // OwnedWrite.key with the minted uid. Anything we created
+      // here is rolled back below if the data write or tracking
+      // upsert fails.
+      const identityResolution = await this.resolveIdentities(seed, rawProduced);
+      const raw = identityResolution.records;
+      const createdIdentities = identityResolution.tracked;
+      const rollbackUids = identityResolution.rollback;
+
+      // From here on, errors should trigger identity rollback.
+      let bodyError: unknown = undefined;
+      try {
 
       // §14.3: walk every record's `data` and replace transformer
       // markers. Sequential per-record; future T7.3 may parallelise.
@@ -1414,6 +1453,53 @@ export class SeedRunner<B extends DbBackend> {
           backend.name(),
           appliedPaths,
         );
+      }
+
+      // §13.4 ext: pre-check declared FOREIGN_KEY constraints.
+      // Catches typo'd uids in id-typed fields that weren't authored
+      // as `$ref` markers. Records that reference a target written
+      // earlier in this run pass via `applied_now`.
+      const appliedNowFk = new Set<string>();
+      for (const e of trackedByName.values()) {
+        for (const p of e.pathsTouched) appliedNowFk.add(p);
+      }
+      for (const r of owned) {
+        appliedNowFk.add(`${r.table}:${r.key}`);
+        appliedNowFk.add(`${r.table}/${r.key}`);
+      }
+      for (const fk of seed.constraints?.foreignKey ?? []) {
+        for (const record of owned) {
+          if (record.table !== fk.path) continue;
+          const data = record.data as Record<string, unknown> | null;
+          if (!data || typeof data !== "object") continue;
+          const value = data[fk.field];
+          if (value === undefined || value === null) continue;
+          if (typeof value !== "string" || value === "") continue;
+          const surrealForm = `${fk.references}:${value}`;
+          const firestoreForm = `${fk.references}/${value}`;
+          if (appliedNowFk.has(surrealForm) || appliedNowFk.has(firestoreForm)) {
+            continue;
+          }
+          const exists = await backend.recordExists(fk.references, value);
+          if (!exists) {
+            this.emit(
+              "error",
+              "seed.constraint_violation",
+              {
+                constraint_kind: "foreign_key",
+                field: fk.field,
+                references: fk.references,
+                missing_target: value,
+                path_key: `${record.table}/${record.key}`,
+              },
+              name,
+            );
+            throw SeedError.coded(
+              "E_CONSTRAINT_FK",
+              `seed ${JSON.stringify(name)}: declared FOREIGN_KEY on ${fk.path}.${fk.field} references ${JSON.stringify(fk.references)} but target ${JSON.stringify(value)} does not exist`,
+            );
+          }
+        }
       }
 
       // §13.4: pre-check declared UNIQUE constraints.
@@ -1509,6 +1595,7 @@ export class SeedRunner<B extends DbBackend> {
         appliedAt: new Date().toISOString(),
         specVersion: this.config.specVersion,
         trackingSchemaVersion: "1",
+        ...(createdIdentities.length > 0 ? { createdIdentities } : {}),
       };
       await backend.tracking().upsert(entry);
       trackedByName.set(name, entry);
@@ -1524,6 +1611,18 @@ export class SeedRunner<B extends DbBackend> {
         name,
       );
       applied += 1;
+      } catch (e) {
+        bodyError = e;
+      }
+      if (bodyError !== undefined) {
+        // Roll back any identities we minted for this seed. Reused
+        // (looked-up) identities stay — they pre-existed the apply
+        // attempt.
+        if (rollbackUids.length > 0) {
+          await this.tearDownIdentities(name, rollbackUids, /*phase*/ "rollback");
+        }
+        throw bodyError;
+      }
     }
 
     return { applied, skipped };
@@ -1559,6 +1658,236 @@ export class SeedRunner<B extends DbBackend> {
     return this.config.scopeTarget;
   }
 
+  /**
+   * Walk every {@link IdentityBinding} on the seed, resolve each
+   * identity (lookup-or-create per `upsertStrategy`), patch each
+   * data record's `uidTargets` JSON pointers + (optionally) replace
+   * the OwnedWrite.key, and return the `(records, identities,
+   * uids-to-roll-back)` triple.
+   *
+   * Empty-binding seeds short-circuit — the whole identity path
+   * is a no-op when `Seed.identities` is empty.
+   */
+  private async resolveIdentities(
+    seed: Seed,
+    raw: OwnedWrite[],
+  ): Promise<{
+    records: OwnedWrite[];
+    tracked: TrackedIdentity[];
+    rollback: Array<[string, string]>; // (provider_name, uid)
+  }> {
+    const bindings = seed.identities ?? {};
+    if (Object.keys(bindings).length === 0) {
+      return { records: raw, tracked: [], rollback: [] };
+    }
+
+    const tracked: TrackedIdentity[] = [];
+    const rollback: Array<[string, string]> = [];
+
+    for (const [bindingName, binding] of Object.entries(bindings)) {
+      const provider = this.config.identityProviders.lookup(binding.provider);
+      if (!provider) {
+        throw SeedError.coded(
+          "E_IDENTITY_FAILED",
+          `seed ${JSON.stringify(seed.name)} binding ${JSON.stringify(bindingName)}: identity provider ${JSON.stringify(binding.provider)} not registered`,
+        );
+      }
+
+      let requests: typeof binding.source extends infer S
+        ? S extends { kind: "inline"; requests: infer R }
+          ? R
+          : never
+        : never;
+      if (binding.source.kind === "inline") {
+        requests = binding.source.requests as typeof requests;
+      } else {
+        throw SeedError.coded(
+          "E_IDENTITY_FAILED",
+          `seed ${JSON.stringify(seed.name)} binding ${JSON.stringify(bindingName)}: IdentitySource "fromBatch" is not yet supported`,
+        );
+      }
+
+      const emailToUid = new Map<string, string>();
+
+      for (const req of requests) {
+        const email = req.email;
+        let existing: { uid: string; email: string } | undefined;
+        try {
+          existing = await provider.lookupByEmail(email);
+        } catch (e) {
+          throw this.identityErrorToSeed(
+            e,
+            seed.name,
+            bindingName,
+            binding.provider,
+            email,
+          );
+        }
+
+        let record: { uid: string; email: string };
+        if (existing) {
+          if (binding.upsertStrategy === "failIfEmailExists") {
+            this.emit(
+              "error",
+              "seed.identity.failed",
+              {
+                binding: bindingName,
+                provider: binding.provider,
+                email,
+                error_code: "E_IDENTITY_FAILED",
+                reason: "email_exists_under_fail_strategy",
+              },
+              seed.name,
+            );
+            throw SeedError.coded(
+              "E_IDENTITY_FAILED",
+              `seed ${JSON.stringify(seed.name)} binding ${JSON.stringify(bindingName)}: email ${JSON.stringify(email)} already has an identity (${JSON.stringify(existing.uid)}); strategy=failIfEmailExists`,
+            );
+          }
+          this.emit(
+            "info",
+            "seed.identity.skipped",
+            {
+              binding: bindingName,
+              provider: binding.provider,
+              email,
+              uid: existing.uid,
+              reason: "email_exists",
+            },
+            seed.name,
+          );
+          record = existing;
+        } else {
+          try {
+            record = await provider.createIdentity(req);
+          } catch (e) {
+            throw this.identityErrorToSeed(
+              e,
+              seed.name,
+              bindingName,
+              binding.provider,
+              email,
+            );
+          }
+          this.emit(
+            "info",
+            "seed.identity.created",
+            {
+              binding: bindingName,
+              provider: binding.provider,
+              email,
+              uid: record.uid,
+            },
+            seed.name,
+          );
+          rollback.push([binding.provider, record.uid]);
+        }
+
+        tracked.push({
+          provider: binding.provider,
+          uid: record.uid,
+          email: record.email,
+          binding: bindingName,
+        });
+        emailToUid.set(email, record.uid);
+      }
+
+      // Patch every record whose match_field matches a resolved
+      // email. Missing intermediate paths in `uidTargets` are silent
+      // no-ops via `setJsonPointer`.
+      for (const write of raw) {
+        const matchValue = getJsonPointer(write.data, binding.matchField);
+        if (typeof matchValue !== "string") continue;
+        const uid = emailToUid.get(matchValue);
+        if (uid === undefined) continue;
+        for (const target of binding.uidTargets) {
+          try {
+            setJsonPointer(write.data, target, uid);
+          } catch (e) {
+            throw SeedError.coded(
+              "E_IDENTITY_FAILED",
+              `seed ${JSON.stringify(seed.name)} binding ${JSON.stringify(bindingName)}: cannot patch uidTarget ${JSON.stringify(target)}: ${(e as Error).message}`,
+            );
+          }
+        }
+        if (binding.keyFromUid) {
+          write.key = uid;
+        }
+      }
+    }
+
+    return { records: raw, tracked, rollback };
+  }
+
+  /**
+   * Walk a list of `(provider, uid)` pairs and call
+   * {@link IdentityProvider.deleteIdentity} on each. Failures emit
+   * `seed.identity.orphaned` (warn) and the loop continues —
+   * orphan identities are recoverable; stopping mid-rollback would
+   * be worse.
+   */
+  private async tearDownIdentities(
+    seedName: string,
+    uids: Array<[string, string]>,
+    phase: "rollback" | "reset",
+  ): Promise<void> {
+    for (const [providerName, uid] of uids) {
+      const provider = this.config.identityProviders.lookup(providerName);
+      if (!provider) {
+        this.emit(
+          "warn",
+          "seed.identity.orphaned",
+          {
+            provider: providerName,
+            uid,
+            reason: "provider_not_registered",
+            phase,
+          },
+          seedName,
+        );
+        continue;
+      }
+      try {
+        await provider.deleteIdentity(uid);
+        this.emit(
+          "info",
+          "seed.identity.deleted",
+          { provider: providerName, uid, phase },
+          seedName,
+        );
+      } catch (e) {
+        this.emit(
+          "warn",
+          "seed.identity.orphaned",
+          {
+            provider: providerName,
+            uid,
+            reason: `delete failed: ${(e as Error).message}`,
+            phase,
+          },
+          seedName,
+        );
+      }
+    }
+  }
+
+  private identityErrorToSeed(
+    err: unknown,
+    seedName: string,
+    bindingName: string,
+    providerName: string,
+    email: string,
+  ): SeedError {
+    if (err instanceof IdentityError) {
+      return err.toSeedError(seedName, bindingName, email);
+    }
+    return SeedError.coded(
+      "E_IDENTITY_FAILED",
+      `seed ${JSON.stringify(seedName)} binding ${JSON.stringify(bindingName)}: provider ${JSON.stringify(providerName)} on email ${JSON.stringify(email)}: ${(err as Error).message ?? String(err)}`,
+      err,
+    );
+  }
+
   private async resolveRefsIn(
     backend: B,
     seedName: string,
@@ -1566,24 +1895,54 @@ export class SeedRunner<B extends DbBackend> {
     backendName: string,
     appliedPaths: Set<string>,
   ): Promise<unknown> {
-    const refs: Array<{ table: string; key: string }> = [];
+    const refs: RefTarget[] = [];
     collectRefTargets(value, refs);
-    if (refs.length === 0) return rewriteRefs(value, backendName);
+    if (refs.length === 0) return rewriteRefs(value, backendName, new Map());
+
+    // §7.1.1 — resolve every Field-form ref to a concrete doc key
+    // via backend.findKeyByField BEFORE the existence check.
+    // E_REF_MISSING when no record matches.
+    const fieldToKey = new Map<string, string>();
+    for (const r of refs) {
+      if (r.kind !== "field") continue;
+      const cacheKey = `${r.table}|${r.field}|${r.value}`;
+      if (fieldToKey.has(cacheKey)) continue;
+      const resolved = await backend.findKeyByField(r.table, r.field, r.value);
+      if (resolved === undefined) {
+        throw SeedError.coded(
+          "E_REF_MISSING",
+          `seed ${JSON.stringify(seedName)} references ${r.table}/{ ${r.field}: ${JSON.stringify(r.value)} } but no record exists in ${r.table} with that ${r.field}`,
+        );
+      }
+      fieldToKey.set(cacheKey, resolved);
+    }
+
+    // Collapse every RefTarget to a concrete (table, key) pair for
+    // the existence check.
+    const keys: Array<{ table: string; key: string }> = refs.map((r) => {
+      if (r.kind === "key") return { table: r.table, key: r.key };
+      const cacheKey = `${r.table}|${r.field}|${r.value}`;
+      const resolved = fieldToKey.get(cacheKey);
+      if (resolved === undefined) {
+        throw new Error("ref resolved above but missing in cache");
+      }
+      return { table: r.table, key: resolved };
+    });
 
     const seen = new Set<string>();
     const existence = new Map<string, boolean>();
-    for (const r of refs) {
-      const cacheKey = `${r.table}/${r.key}`;
+    for (const { table, key } of keys) {
+      const cacheKey = `${table}/${key}`;
       if (seen.has(cacheKey)) continue;
       seen.add(cacheKey);
       if (
-        appliedPaths.has(`${r.table}:${r.key}`) ||
-        appliedPaths.has(`${r.table}/${r.key}`)
+        appliedPaths.has(`${table}:${key}`) ||
+        appliedPaths.has(`${table}/${key}`)
       ) {
         existence.set(cacheKey, true);
         continue;
       }
-      const exists = await backend.recordExists(r.table, r.key);
+      const exists = await backend.recordExists(table, key);
       existence.set(cacheKey, exists);
     }
     for (const [k, ok] of existence) {
@@ -1594,7 +1953,7 @@ export class SeedRunner<B extends DbBackend> {
         );
       }
     }
-    return rewriteRefs(value, backendName);
+    return rewriteRefs(value, backendName, fieldToKey);
   }
 
   /**
@@ -1651,10 +2010,7 @@ export class SeedRunner<B extends DbBackend> {
 
 // ────────────────── pure helpers (sync) for ref walker ──────────────────
 
-function collectRefTargets(
-  value: unknown,
-  out: Array<{ table: string; key: string }>,
-): void {
+function collectRefTargets(value: unknown, out: RefTarget[]): void {
   const m = asRefMarker(value);
   if (m) {
     out.push(m);
@@ -1671,18 +2027,42 @@ function collectRefTargets(
   }
 }
 
-function rewriteRefs(value: unknown, backendName: string): unknown {
+/**
+ * Replace every `$ref` marker with its wire form (spec §7.1):
+ * - `kind: "key"` → `table/key` (Firestore) or `table:key` (SurrealDB)
+ *   — historical path-string for path-typed fields.
+ * - `kind: "field"` → bare resolved key string — for id-typed fields
+ *   that store the target's doc key verbatim.
+ *
+ * `fieldToKey` provides the resolved doc keys for field-form refs
+ * (resolved earlier async).
+ */
+function rewriteRefs(
+  value: unknown,
+  backendName: string,
+  fieldToKey: Map<string, string>,
+): unknown {
   const m = asRefMarker(value);
   if (m) {
-    return backendName === "surrealdb" ? `${m.table}:${m.key}` : `${m.table}/${m.key}`;
+    if (m.kind === "key") {
+      return backendName === "surrealdb"
+        ? `${m.table}:${m.key}`
+        : `${m.table}/${m.key}`;
+    }
+    const cacheKey = `${m.table}|${m.field}|${m.value}`;
+    const resolved = fieldToKey.get(cacheKey);
+    if (resolved === undefined) {
+      throw new Error("rewriteRefs: field-form ref not in resolved cache");
+    }
+    return resolved;
   }
   if (Array.isArray(value)) {
-    return value.map((v) => rewriteRefs(v, backendName));
+    return value.map((v) => rewriteRefs(v, backendName, fieldToKey));
   }
   if (value !== null && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[k] = rewriteRefs(v, backendName);
+      out[k] = rewriteRefs(v, backendName, fieldToKey);
     }
     return out;
   }

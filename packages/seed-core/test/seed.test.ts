@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import {
   asRefMarker,
+  refMarkerByField,
+  refMarkerByEmail,
   hashCanonical,
   refMarker,
   Registry,
@@ -97,17 +99,55 @@ describe("Registry", () => {
 });
 
 describe("refMarker / asRefMarker", () => {
-  it("recognises canonical shape", () => {
+  it("recognises the direct-key shape", () => {
     const m = refMarker("users", "alice");
-    expect(asRefMarker(m)).toEqual({ table: "users", key: "alice" });
+    expect(asRefMarker(m)).toEqual({
+      kind: "key",
+      table: "users",
+      key: "alice",
+    });
+  });
+
+  it("recognises the email sugar (2-field) and desugars to field form", () => {
+    const m = refMarkerByEmail("users", "alice@x.com");
+    expect(asRefMarker(m)).toEqual({
+      kind: "field",
+      table: "users",
+      field: "email",
+      value: "alice@x.com",
+    });
+  });
+
+  it("recognises the generic 3-field shape", () => {
+    const m = refMarkerByField("products", "slug", "leather-wallet");
+    expect(asRefMarker(m)).toEqual({
+      kind: "field",
+      table: "products",
+      field: "slug",
+      value: "leather-wallet",
+    });
   });
 
   it("rejects extra keys on outer", () => {
     expect(asRefMarker({ $ref: { table: "u", key: "a" }, extra: 1 })).toBeUndefined();
   });
 
-  it("rejects extra keys on inner", () => {
-    expect(asRefMarker({ $ref: { table: "u", key: "a", extra: 1 } })).toBeUndefined();
+  it("rejects 4-field inner", () => {
+    expect(
+      asRefMarker({
+        $ref: { table: "u", field: "email", value: "X", extra: 1 },
+      }),
+    ).toBeUndefined();
+  });
+
+  it("rejects 2-field inner without key or email", () => {
+    expect(asRefMarker({ $ref: { table: "u", phone: "X" } })).toBeUndefined();
+  });
+
+  it("rejects 3-field inner missing field or value", () => {
+    expect(
+      asRefMarker({ $ref: { table: "u", field: "email", data: "X" } }),
+    ).toBeUndefined();
   });
 
   it("rejects wrong wrapper key", () => {

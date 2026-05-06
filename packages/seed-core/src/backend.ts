@@ -66,6 +66,21 @@ export interface DbBackend {
     value: unknown,
     excludingKey: string,
   ): Promise<string[]>;
+  /**
+   * Find the doc key of a record in `table` whose `field` equals
+   * `value` (spec §7.1.1). Returns `undefined` when no record matches.
+   * Used by the runner to resolve `$ref` markers in the
+   * field/email form.
+   *
+   * Default impls (where the backend doesn't natively support
+   * field-based lookup) MAY return `undefined` — the runner
+   * surfaces `E_REF_MISSING` cleanly to seeds that rely on this.
+   */
+  findKeyByField(
+    table: string,
+    field: string,
+    value: unknown,
+  ): Promise<string | undefined>;
   /** Display name for telemetry (`"surrealdb"`, `"firestore"`). */
   name(): string;
   /**
