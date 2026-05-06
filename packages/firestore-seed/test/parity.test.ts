@@ -7,17 +7,26 @@ import {
   CapturingEmitter,
   compareEventShapes,
   hashCanonical,
-  parseNdjson,
+  type CreateIdentityRequest,
+  type IdentityBinding,
   type OwnedWrite,
+  parseNdjson,
+  refMarkerByEmail,
+  refMarkerByField,
   type Seed,
   type SeedAction,
   SeedConfig,
   SeedRunner,
 } from "@servicecute/seed-core";
 import { initializeApp, getApps, deleteApp } from "firebase-admin/app";
+import { getAuth } from "firebase-admin/auth";
 import { getFirestore, type Firestore } from "firebase-admin/firestore";
 
-import { FirestoreBackend, SEEDS_COLLECTION } from "../src/index.js";
+import {
+  FirebaseAdminIdentityProvider,
+  FirestoreBackend,
+  SEEDS_COLLECTION,
+} from "../src/index.js";
 
 /**
  * Spec §21 + §11.5.4 parity test (T10.3 + T10.4).
@@ -190,6 +199,275 @@ describe.skipIf(!PARITY_ENABLED)("Firestore parity (T10.3 + T10.4)", () => {
         .tracking()
         .list();
       expect(listed).toEqual([]);
+    } finally {
+      await Promise.all(getApps().map((a) => deleteApp(a)));
+    }
+  });
+});
+
+// ────────────────── §25 + §13.4 + §7.1 extensions ──────────────────
+
+/**
+ * Throwaway personas matching what the Rust parity test mints.
+ * Both sides MUST emit the same uids — the Firebase emulator hashes
+ * email → uid deterministically per project, so identical inputs
+ * produce identical outputs.
+ */
+const PARITY_PERSONAS: Array<{
+  email: string;
+  displayName: string;
+  password: string;
+}> = [
+  { email: "alice@parity.demo", displayName: "Alice Parity", password: "demo-pass-1" },
+  { email: "bob@parity.demo", displayName: "Bob Parity", password: "demo-pass-2" },
+];
+
+const PARITY_AUTH_COLLECTION = "__parity_users";
+const PARITY_PRODUCTS_COLLECTION = "__parity_products";
+
+function reqOf(p: { email: string; displayName: string; password: string }): CreateIdentityRequest {
+  return {
+    email: p.email,
+    password: p.password,
+    emailVerified: true,
+    displayName: p.displayName,
+    disabled: false,
+    customClaims: {},
+    params: null,
+  };
+}
+
+class ParityUsersAction implements SeedAction {
+  async produce(): Promise<OwnedWrite[]> {
+    return PARITY_PERSONAS.map((p) => ({
+      // key is a placeholder; the runner replaces it with the
+      // minted uid via key_from_uid.
+      table: PARITY_AUTH_COLLECTION,
+      key: p.email,
+      data: { email: p.email, display_name: p.displayName, firebase_uid: null },
+    }));
+  }
+}
+
+function parityUsersSeed(): Seed {
+  return {
+    name: "parity-users",
+    scope: ["development"],
+    dependsOn: [],
+    requires: [],
+    requiresSchemas: {},
+    identities: {
+      personas: {
+        provider: "firebase",
+        source: { kind: "inline", requests: PARITY_PERSONAS.map(reqOf) },
+        uidTargets: ["/firebase_uid"],
+        matchField: "/email",
+        keyFromUid: true,
+        upsertStrategy: "skipIfEmailExists",
+      },
+    },
+    keyHash: hashCanonical(JSON.stringify(PARITY_PERSONAS)),
+  };
+}
+
+/**
+ * Cross-seed reference test — products own a `seller_email` field
+ * that resolves via `$ref` by-field to the user's minted uid.
+ */
+class ParityProductsAction implements SeedAction {
+  async produce(): Promise<OwnedWrite[]> {
+    return [
+      {
+        table: PARITY_PRODUCTS_COLLECTION,
+        key: "p1",
+        data: {
+          name: "Notebook",
+          slug: "notebook",
+          // Email-form ref → bare resolved uid string
+          owner_uid: refMarkerByEmail(
+            PARITY_AUTH_COLLECTION,
+            PARITY_PERSONAS[0]!.email,
+          ),
+        },
+      },
+      {
+        table: PARITY_PRODUCTS_COLLECTION,
+        key: "p2",
+        data: {
+          name: "Pen",
+          slug: "pen",
+          // Generic by-field — exercises the §7.1.1 generalization
+          // even though `email` would also work; the difference is
+          // the spec contract, not the runtime behaviour.
+          owner_uid: refMarkerByField(
+            PARITY_AUTH_COLLECTION,
+            "email",
+            PARITY_PERSONAS[1]!.email,
+          ),
+        },
+      },
+    ];
+  }
+}
+
+function parityProductsSeed(): Seed {
+  return {
+    name: "parity-products",
+    scope: ["development"],
+    dependsOn: ["parity-users"],
+    requires: [],
+    requiresSchemas: {},
+    constraints: {
+      // §13.4 ext: declare that owner_uid MUST point at a parity-users record.
+      foreignKey: [
+        {
+          path: PARITY_PRODUCTS_COLLECTION,
+          field: "owner_uid",
+          references: PARITY_AUTH_COLLECTION,
+        },
+      ],
+    },
+    keyHash: "sha256:parity-products-v1",
+  };
+}
+
+async function dropParityIdentitiesAndDocs(db: Firestore): Promise<void> {
+  // Sweep tracking + collections from prior runs. We clear by known
+  // keys + a list-and-delete of dynamic users since their doc keys
+  // are uids.
+  for (const id of ["parity-users", "parity-products"]) {
+    await db.collection(SEEDS_COLLECTION).doc(id).delete().catch(() => {});
+  }
+  for (const col of [PARITY_AUTH_COLLECTION, PARITY_PRODUCTS_COLLECTION]) {
+    const snap = await db.collection(col).get();
+    await Promise.all(snap.docs.map((d) => d.ref.delete()));
+  }
+  // Tear down auth identities by email so a re-run starts clean.
+  const auth = getAuth();
+  for (const p of PARITY_PERSONAS) {
+    try {
+      const u = await auth.getUserByEmail(p.email);
+      await auth.deleteUser(u.uid);
+    } catch {
+      // not-found is fine
+    }
+  }
+}
+
+describe.skipIf(!PARITY_ENABLED)("Firestore + Firebase Auth parity (§25 + §7.1 + §13.4)", () => {
+  it("paired identity-data lifecycle: apply → assert → reset → assert", async () => {
+    const db = connectTestDb();
+    try {
+      await dropParityIdentitiesAndDocs(db);
+
+      const backend = new FirestoreBackend(db);
+      const config = new SeedConfig({
+        backend,
+        scopeTarget: "development",
+        holderLabel: "parity-identity",
+      });
+      config.seeds.register("parity-users", parityUsersSeed());
+      config.actions.register("parity-users", new ParityUsersAction());
+      config.seeds.register("parity-products", parityProductsSeed());
+      config.actions.register("parity-products", new ParityProductsAction());
+      config.identityProviders.register(
+        "firebase",
+        new FirebaseAdminIdentityProvider(),
+      );
+      const runner = new SeedRunner(config);
+
+      // Apply both seeds in topo order (parity-products dependsOn
+      // parity-users; runner resolves automatically with empty list).
+      await runner.apply([]);
+
+      // ---- Assert: Firebase Auth has 2 minted identities ----------
+      const auth = getAuth();
+      const aliceAuth = await auth.getUserByEmail(PARITY_PERSONAS[0]!.email);
+      const bobAuth = await auth.getUserByEmail(PARITY_PERSONAS[1]!.email);
+      expect(aliceAuth.uid).toBeTruthy();
+      expect(bobAuth.uid).toBeTruthy();
+
+      // ---- Assert: Firestore docs are keyed by the uids -----------
+      const aliceDoc = await db
+        .collection(PARITY_AUTH_COLLECTION)
+        .doc(aliceAuth.uid)
+        .get();
+      expect(aliceDoc.exists).toBe(true);
+      const aliceData = aliceDoc.data() as { firebase_uid: string };
+      expect(aliceData.firebase_uid).toBe(aliceAuth.uid);
+
+      // ---- Assert: products' `$ref` resolved to the bare uids -----
+      const p1 = await db.collection(PARITY_PRODUCTS_COLLECTION).doc("p1").get();
+      expect((p1.data() as { owner_uid: string }).owner_uid).toBe(aliceAuth.uid);
+      const p2 = await db.collection(PARITY_PRODUCTS_COLLECTION).doc("p2").get();
+      expect((p2.data() as { owner_uid: string }).owner_uid).toBe(bobAuth.uid);
+
+      // ---- Assert: tracking row carries createdIdentities ---------
+      const tracked = await backend.tracking().get("parity-users");
+      expect(tracked!.createdIdentities?.length).toBe(2);
+      expect(tracked!.createdIdentities?.map((t) => t.email).sort()).toEqual([
+        "alice@parity.demo",
+        "bob@parity.demo",
+      ]);
+
+      // ---- Reset --------------------------------------------------
+      await runner.resetAll(true);
+
+      // Both Firestore collections empty.
+      for (const col of [PARITY_AUTH_COLLECTION, PARITY_PRODUCTS_COLLECTION]) {
+        const snap = await db.collection(col).get();
+        expect(snap.empty).toBe(true);
+      }
+      // Auth identities torn down.
+      for (const p of PARITY_PERSONAS) {
+        await expect(auth.getUserByEmail(p.email)).rejects.toMatchObject({
+          code: "auth/user-not-found",
+        });
+      }
+    } finally {
+      await Promise.all(getApps().map((a) => deleteApp(a)));
+    }
+  });
+
+  it("foreign_key hint surfaces E_CONSTRAINT_FK on missing target", async () => {
+    const db = connectTestDb();
+    try {
+      await dropParityIdentitiesAndDocs(db);
+
+      const backend = new FirestoreBackend(db);
+      const config = new SeedConfig({
+        backend,
+        scopeTarget: "development",
+        holderLabel: "parity-fk",
+      });
+      // Skip applying parity-users — the FK target intentionally
+      // doesn't exist.
+      config.seeds.register("parity-products", {
+        ...parityProductsSeed(),
+        // Drop the depends_on so the runner doesn't refuse.
+        dependsOn: [],
+      });
+      config.actions.register(
+        "parity-products",
+        new (class implements SeedAction {
+          async produce(): Promise<OwnedWrite[]> {
+            return [
+              {
+                table: PARITY_PRODUCTS_COLLECTION,
+                key: "orphan",
+                data: {
+                  name: "Orphan",
+                  // Hardcoded uid — no $ref, no upstream record.
+                  owner_uid: "user-does-not-exist",
+                },
+              },
+            ];
+          }
+        })(),
+      );
+      const runner = new SeedRunner(config);
+
+      await expect(runner.apply([])).rejects.toThrow(/E_CONSTRAINT_FK/);
     } finally {
       await Promise.all(getApps().map((a) => deleteApp(a)));
     }

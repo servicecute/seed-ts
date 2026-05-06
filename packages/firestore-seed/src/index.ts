@@ -8,6 +8,10 @@
  */
 
 export { FirestoreBackend } from "./backend.js";
+export {
+  FirebaseAdminIdentityProvider,
+  type FirebaseAdminIdentityProviderOptions,
+} from "./identity.js";
 export { FirestoreTracking } from "./tracking.js";
 export { FirestoreLock } from "./lock.js";
 export { schemaForFirestore } from "./schema.js";
