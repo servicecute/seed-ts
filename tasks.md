@@ -148,6 +148,32 @@ trackable side-by-side. Sibling reference: `rust-workspace/lib-seed-core/tasks.m
 - [ ] `T16.1` Rust-side parity already shipped — these crates exist to flip TS scoreboard rows
 - [ ] `T16.2`–`T16.10` Mirror Rust workspace's open-question backlog (subcollections, multi-tenant scope, --atomic, optimistic concurrency, partial-merge, NDJSON redaction, server-side `applied_at`, generator parallelism, additional backends)
 
+#### T17 — SurrealDB identity parity (§24 closure)
+
+The Rust adapter (`SurrealAuthIdentityProvider` in
+`rust-workspace/srv-surrealdb-auth/clients/rust/src/seed_identity.rs`)
+and TS adapter (`rust-workspace/srv-surrealdb-auth/clients/typescript/src/seed-identity.ts`)
+both ship today. The remaining work is exclusively about test-time
+bootstrap. Tracked in `srv-surrealdb-auth/tasks.md` as
+T-IDENTITY-PARITY-1..4 — when those land:
+
+- [ ] `T17.1` Add `@surrealdb-auth/client` as a devDependency on
+      `seed-ts/packages/surrealdb-seed`. Either via npm publish
+      (preferred) or `file:` link to the rust-workspace path.
+- [ ] `T17.2` Extend `seed-ts/packages/surrealdb-seed/test/parity.test.ts`
+      with the same identity scenarios as the Firestore parity:
+      `paired_identity_data_lifecycle` + `foreign_key_hint`. Skip-
+      gated on `SURREAL_AUTH_URL` + `SURREAL_AUTH_API_KEY` env
+      vars at runtime, matching the Rust `parity-identity`
+      feature pattern.
+- [ ] `T17.3` Run end-to-end against bootstrapped SurrealDB +
+      srv-surrealdb-auth. Confirm uids match across Rust + TS for
+      identical fixtures (the SurrealDB version of the byte-parity
+      contract).
+- [ ] `T17.4` Bump `seed-ts/@servicecute/surrealdb-seed` row in
+      `registry/seed-spec/seed-spec.md` §25 to "0.5.0 conformant"
+      once T17.3 is green and the matching Rust row also flips.
+
 ## Completed
 
 - [x] `T11.4` Initial commit + new GitHub repo — scaffolding only. *(2026-05-04)*
