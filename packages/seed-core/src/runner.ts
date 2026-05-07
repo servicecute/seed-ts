@@ -1470,9 +1470,7 @@ export class SeedRunner<B extends DbBackend> {
       for (const fk of seed.constraints?.foreignKey ?? []) {
         for (const record of owned) {
           if (record.table !== fk.path) continue;
-          const data = record.data as Record<string, unknown> | null;
-          if (!data || typeof data !== "object") continue;
-          const value = data[fk.field];
+          const value = walkDottedPath(record.data, fk.field);
           if (value === undefined || value === null) continue;
           if (typeof value !== "string" || value === "") continue;
           const surrealForm = `${fk.references}:${value}`;
@@ -1506,10 +1504,8 @@ export class SeedRunner<B extends DbBackend> {
       for (const unique of seed.constraints?.unique ?? []) {
         for (const record of owned) {
           if (record.table !== unique.path) continue;
-          const data = record.data as Record<string, unknown> | null;
-          if (!data || typeof data !== "object") continue;
-          if (!(unique.field in data)) continue;
-          const value = (data as Record<string, unknown>)[unique.field];
+          const value = walkDottedPath(record.data, unique.field);
+          if (value === undefined) continue;
           const conflicts = await backend.findUniqueConflicts(
             unique.path,
             unique.field,
@@ -2009,6 +2005,26 @@ export class SeedRunner<B extends DbBackend> {
 }
 
 // ────────────────── pure helpers (sync) for ref walker ──────────────────
+
+/**
+ * Walk a dot-notation path into a JSON value (spec §13.4 ext) — same
+ * semantics as the Rust `walk_dotted_path` helper. Returns
+ * `undefined` for any miss; a `null` leaf is returned as `null`
+ * (caller distinguishes if needed). Field names containing literal
+ * dots aren't supported.
+ */
+function walkDottedPath(value: unknown, path: string): unknown {
+  if (path === "") return value;
+  let cursor = value;
+  for (const seg of path.split(".")) {
+    if (cursor === null || typeof cursor !== "object" || Array.isArray(cursor)) {
+      return undefined;
+    }
+    cursor = (cursor as Record<string, unknown>)[seg];
+    if (cursor === undefined) return undefined;
+  }
+  return cursor;
+}
 
 function collectRefTargets(value: unknown, out: RefTarget[]): void {
   const m = asRefMarker(value);

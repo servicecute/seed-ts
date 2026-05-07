@@ -165,7 +165,11 @@ export class SurrealBackend implements DbBackend {
     // Same identifier-safety rule as findUniqueConflicts — field
     // names are spliced into the SELECT, so reject anything that
     // isn't a plain identifier.
-    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(field)) {
+    // Allow dot-notation paths (§13.4 ext) — SurrealDB SQL natively
+    // resolves `customer.email` as nested-field access. Each segment
+    // must still be a plain identifier; we splice the whole path
+    // verbatim so we vet each segment independently.
+    if (!field.split(".").every((seg) => /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(seg))) {
       throw SeedError.coded(
         "E_INTERNAL",
         `findKeyByField: refusing to splice non-identifier field name ${JSON.stringify(field)}`,
@@ -204,7 +208,11 @@ export class SurrealBackend implements DbBackend {
     // would require dynamic SQL anyway). Field names are validated by
     // the registry pattern's `[a-z][a-z0-9_-]*` rule and so are
     // injection-safe.
-    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(field)) {
+    // Allow dot-notation paths (§13.4 ext) — SurrealDB SQL natively
+    // resolves `customer.email` as nested-field access. Each segment
+    // must still be a plain identifier; we splice the whole path
+    // verbatim so we vet each segment independently.
+    if (!field.split(".").every((seg) => /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(seg))) {
       throw SeedError.coded(
         "E_INTERNAL",
         `findUniqueConflicts: refusing to splice non-identifier field name ${JSON.stringify(field)}`,
