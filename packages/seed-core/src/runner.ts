@@ -45,7 +45,9 @@ import {
   type SchemaRegistry,
 } from "./schema.js";
 import {
+  applyKeyExpr,
   asRefMarker,
+  keyTemplateLookupKey,
   topologicalOrder,
   type OwnedWrite,
   type RefTarget,
@@ -53,6 +55,7 @@ import {
   type SeedActionRegistry,
   type SeedRegistry,
 } from "./seed.js";
+import type { KeyExpr } from "./key-expr.js";
 import type { TrackingEntry } from "./tracking.js";
 import {
   resolveMarkers,
@@ -1453,6 +1456,37 @@ export class SeedRunner<B extends DbBackend> {
           backend.name(),
           appliedPaths,
         );
+      }
+
+      // §26: apply key templates registered via
+      // `SeedAction.keyTemplates`. Runs after $ref + identity
+      // resolution so templates can reference the post-binding
+      // minted uids that landed in `record.data`. Lookup is by
+      // (table, current_key) — the placeholder the seed emitted
+      // from `produce()`.
+      const action = this.config.actions.lookup(name);
+      const templates =
+        (action && typeof action.keyTemplates === "function"
+          ? action.keyTemplates()
+          : undefined) ?? new Map<string, KeyExpr>();
+      if (templates.size > 0) {
+        for (const record of owned) {
+          const lookup = keyTemplateLookupKey(record.table, record.key);
+          const template = templates.get(lookup);
+          if (template !== undefined) {
+            const finalKey = applyKeyExpr(template, record.data);
+            this.emit(
+              "info",
+              "seed.key_template.applied",
+              {
+                table: record.table,
+                placeholder_key: record.key,
+              },
+              name,
+            );
+            record.key = finalKey;
+          }
+        }
       }
 
       // §13.4 ext: pre-check declared FOREIGN_KEY constraints.

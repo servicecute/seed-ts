@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
+import type { KeyExpr } from "./key-expr.js";
+import { applyKeyExpr } from "./key-expr.js";
 import { Registry } from "./registry.js";
 import { SeedError } from "./error.js";
+
+// Re-export so the runner can use it without an extra import path.
+export { applyKeyExpr };
 
 /** Stable seed identifier — `(table, key)` per spec §6.1. */
 export interface SeedKey {
@@ -186,6 +191,28 @@ export interface OwnedWrite {
  */
 export interface SeedAction {
   produce(): Promise<OwnedWrite[]>;
+
+  /**
+   * Optional per-record key templates (seed-spec §26 v0.6.1) keyed by
+   * `${table}\x00${placeholderKey}` — the placeholder is whatever
+   * `produce()` emits as `OwnedWrite.key`. The runner applies
+   * templates AFTER `$ref` resolution and identity binding finish
+   * populating `record.data`, replacing `record.key` with
+   * {@link applyKeyExpr} output.
+   *
+   * Use this when a row's natural-key id (e.g. `sha256(group ||
+   * user)`) depends on values that don't exist at `produce()` time —
+   * typically the post-binding minted identity uid.
+   *
+   * Default: `undefined` (no templates). Implementations MAY return
+   * `undefined` or an empty Map; semantics are equivalent.
+   */
+  keyTemplates?(): Map<string, KeyExpr> | undefined;
+}
+
+/** Build the lookup key used by {@link SeedAction.keyTemplates}. */
+export function keyTemplateLookupKey(table: string, key: string): string {
+  return `${table}\x00${key}`;
 }
 
 export type SeedActionRegistry = Registry<SeedAction>;

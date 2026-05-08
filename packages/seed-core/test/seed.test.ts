@@ -79,9 +79,23 @@ describe("hashCanonical", () => {
 });
 
 describe("Registry", () => {
-  it("rejects names not matching [a-z][a-z0-9_-]*", () => {
+  // §4.1 v0.6.1: names that identify external entities (e.g.
+  // Firestore collections like `groupMembers`) are permitted.
+  it("accepts camelCase for collection-shaped names", () => {
     const r = new Registry<number>();
-    expect(() => r.register("Foo", 1)).toThrow(/must match/);
+    expect(() => r.register("groupMembers", 1)).not.toThrow();
+    expect(r.lookup("groupMembers")).toBe(1);
+  });
+
+  it("rejects names with leading digit", () => {
+    const r = new Registry<number>();
+    expect(() => r.register("1foo", 1)).toThrow(/must match/);
+  });
+
+  it("rejects whitespace or special chars", () => {
+    const r = new Registry<number>();
+    expect(() => r.register("foo bar", 1)).toThrow(/must match/);
+    expect(() => r.register("foo$bar", 2)).toThrow(/must match/);
   });
 
   it("rejects duplicates", () => {

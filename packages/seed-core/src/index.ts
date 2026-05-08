@@ -11,6 +11,7 @@
 
 export * from "./error.js";
 export * from "./event.js";
+export * from "./key-expr.js";
 export * from "./registry.js";
 export * from "./seed.js";
 export * from "./schema.js";

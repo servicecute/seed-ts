@@ -24,6 +24,7 @@ export const ErrorCodes = [
   "E_GENERATOR_NOT_FOUND",
   "E_IDENTITY_FAILED",
   "E_CONSTRAINT_FK",
+  "E_KEY_TEMPLATE_FAILED",
   "E_ORPHANED_ENTRIES",
   "E_INTERNAL",
 ] as const;
@@ -50,6 +51,7 @@ export function exitCodeFor(code: ErrorCode | undefined): number {
     case "E_ORPHANED_ENTRIES":
     case "E_GENERATOR_BUDGET_EXCEEDED":
     case "E_GENERATOR_NOT_FOUND":
+    case "E_KEY_TEMPLATE_FAILED":
       return 1;
     default:
       return 2;
