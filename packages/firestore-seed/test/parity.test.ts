@@ -9,6 +9,7 @@ import {
   hashCanonical,
   type CreateIdentityRequest,
   type IdentityBinding,
+  type KeyExpr,
   type OwnedWrite,
   parseNdjson,
   refMarkerByEmail,
@@ -468,6 +469,143 @@ describe.skipIf(!PARITY_ENABLED)("Firestore + Firebase Auth parity (§25 + §7.1
       const runner = new SeedRunner(config);
 
       await expect(runner.apply([])).rejects.toThrow(/E_CONSTRAINT_FK/);
+    } finally {
+      await Promise.all(getApps().map((a) => deleteApp(a)));
+    }
+  });
+});
+
+// ────────────────── §26 templated doc keys ──────────────────
+
+const PARITY_MEMBERSHIPS_COLLECTION = "memberships";
+
+/**
+ * Cross-language parity invariant. This exact string MUST be the doc
+ * id both the TS and the Rust implementation produce for the
+ * `(prefix="memberships_", parts=[/groupId, /userId])` template
+ * applied against `{groupId: "group-acme", userId: "user-alice-uid-123"}`.
+ *
+ * If either side drifts (different SHA-256 implementation, different
+ * byte encoding, different hex casing), this assertion fails. The
+ * matching Rust assertion lives in
+ * `lib-firestore-seed/tests/parity.rs::parity_key_template_round_trip`
+ * and embeds the same literal.
+ */
+const EXPECTED_TEMPLATED_KEY =
+  "memberships_cf6964951e6e2a3dc36b70b64bd4f3a64fb63cf336170f43339de72c6e8ae220";
+
+class ParityMembershipsAction implements SeedAction {
+  async produce(): Promise<OwnedWrite[]> {
+    return [
+      {
+        table: PARITY_MEMBERSHIPS_COLLECTION,
+        // Placeholder — runner overwrites via keyTemplates().
+        key: "membership-stub",
+        data: {
+          groupId: "group-acme",
+          userId: "user-alice-uid-123",
+        },
+      },
+    ];
+  }
+
+  keyTemplates(): Map<string, KeyExpr> {
+    const template: KeyExpr = {
+      kind: "sha256_hex",
+      prefix: "memberships_",
+      parts: [
+        { source: "data_path", pointer: "/groupId" },
+        { source: "data_path", pointer: "/userId" },
+      ],
+    };
+    return new Map([
+      [`${PARITY_MEMBERSHIPS_COLLECTION}\x00membership-stub`, template],
+    ]);
+  }
+}
+
+function parityMembershipsSeed(): Seed {
+  return {
+    name: "parity-memberships",
+    scope: ["development"],
+    dependsOn: [],
+    requires: [],
+    requiresSchemas: {},
+    keyHash: hashCanonical("group-acme|user-alice-uid-123"),
+  };
+}
+
+async function dropTemplatedState(db: Firestore): Promise<void> {
+  const docs: Array<[string, string]> = [
+    [PARITY_MEMBERSHIPS_COLLECTION, "membership-stub"],
+    [PARITY_MEMBERSHIPS_COLLECTION, EXPECTED_TEMPLATED_KEY],
+    [SEEDS_COLLECTION, "parity-memberships"],
+    [SEEDS_COLLECTION, "_lock_apply"],
+  ];
+  for (const [col, id] of docs) {
+    await db.collection(col).doc(id).delete().catch(() => {});
+  }
+}
+
+describe.skipIf(!PARITY_ENABLED)("Firestore parity §26 (KeyExpr)", () => {
+  it("templated key matches Rust output byte-for-byte", async () => {
+    const db = connectTestDb();
+    try {
+      await dropTemplatedState(db);
+
+      const backend = new FirestoreBackend(db);
+      const config = new SeedConfig({
+        backend,
+        scopeTarget: "development",
+        holderLabel: "parity-key-template",
+      });
+      config.seeds.register("parity-memberships", parityMembershipsSeed());
+      config.actions.register(
+        "parity-memberships",
+        new ParityMembershipsAction(),
+      );
+      const runner = new SeedRunner(config);
+
+      await runner.apply([]);
+
+      // 1. Placeholder MUST NOT exist — the template overwrote it.
+      const placeholder = await db
+        .collection(PARITY_MEMBERSHIPS_COLLECTION)
+        .doc("membership-stub")
+        .get();
+      expect(placeholder.exists).toBe(false);
+
+      // 2. The cross-language-fixed final key MUST exist with the
+      //    resolved data. Same literal as the Rust parity test —
+      //    drift on either side fails this assertion.
+      const finalDoc = await db
+        .collection(PARITY_MEMBERSHIPS_COLLECTION)
+        .doc(EXPECTED_TEMPLATED_KEY)
+        .get();
+      expect(finalDoc.exists).toBe(true);
+      const data = finalDoc.data() as { groupId: string; userId: string };
+      expect(data.groupId).toBe("group-acme");
+      expect(data.userId).toBe("user-alice-uid-123");
+
+      // 3. Tracking records the FINAL templated key (§26.3 ends with
+      //    tracking; reset deletes by recorded path).
+      const tracking = await (
+        await runner.config.resolveBackend("development")
+      )
+        .tracking()
+        .get("parity-memberships");
+      expect(tracking).toBeDefined();
+      expect(tracking!.pathsTouched).toEqual([
+        `${PARITY_MEMBERSHIPS_COLLECTION}/${EXPECTED_TEMPLATED_KEY}`,
+      ]);
+
+      // 4. Reset takes both data and tracking back to empty.
+      await runner.resetAll(true);
+      const after = await db
+        .collection(PARITY_MEMBERSHIPS_COLLECTION)
+        .doc(EXPECTED_TEMPLATED_KEY)
+        .get();
+      expect(after.exists).toBe(false);
     } finally {
       await Promise.all(getApps().map((a) => deleteApp(a)));
     }
