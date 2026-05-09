@@ -13,7 +13,7 @@
  */
 
 export const TRACKING_DDL = `
-DEFINE TABLE IF NOT EXISTS __seeds SCHEMALESS;
+DEFINE TABLE IF NOT EXISTS __seeds SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS name                    ON TABLE __seeds TYPE string;
 DEFINE FIELD IF NOT EXISTS applied_at              ON TABLE __seeds TYPE datetime;
 DEFINE FIELD IF NOT EXISTS key_hash                ON TABLE __seeds TYPE string;
