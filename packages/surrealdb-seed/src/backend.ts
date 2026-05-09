@@ -7,10 +7,39 @@ import {
   type WriteRequest,
   type WriteResult,
 } from "@servicecute/seed-core";
+import { RecordId } from "surrealdb";
 import type { Surreal } from "surrealdb";
 
 import { SurrealLock } from "./lock.js";
 import { SurrealTracking } from "./tracking.js";
+
+/**
+ * Recursively convert `"table:key"` strings to `RecordId` objects so
+ * SurrealDB `record<table>` fields accept the value without coercion errors.
+ * Only converts strings that match the `word:non-empty` pattern.
+ */
+function deepConvertRecordIds(value: unknown): unknown {
+  if (typeof value === "string") {
+    const colon = value.indexOf(":");
+    if (colon > 0 && colon < value.length - 1) {
+      const table = value.slice(0, colon);
+      const id = value.slice(colon + 1);
+      if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(table)) {
+        return new RecordId(table, id);
+      }
+    }
+    return value;
+  }
+  if (Array.isArray(value)) return value.map(deepConvertRecordIds);
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = deepConvertRecordIds(v);
+    }
+    return out;
+  }
+  return value;
+}
 
 /**
  * Best-effort detection of a referential-integrity rejection from
@@ -72,7 +101,7 @@ export class SurrealBackend implements DbBackend {
       lines.push(`UPSERT type::record($t${i}, $k${i}) CONTENT $d${i};`);
       bindings[`t${i}`] = w.table;
       bindings[`k${i}`] = w.key;
-      bindings[`d${i}`] = w.data;
+      bindings[`d${i}`] = deepConvertRecordIds(w.data);
     }
     lines.push("COMMIT TRANSACTION;");
 

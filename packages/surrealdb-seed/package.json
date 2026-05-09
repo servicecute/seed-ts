@@ -8,7 +8,10 @@
   "exports": {
     ".": "./src/index.ts"
   },
-  "files": ["src", "README.md"],
+  "files": [
+    "src",
+    "README.md"
+  ],
   "scripts": {
     "build": "bun --bun tsc -b",
     "test": "bun test"
@@ -16,5 +19,8 @@
   "dependencies": {
     "@servicecute/seed-core": "workspace:^",
     "surrealdb": "^2.0.0"
+  },
+  "peerDependencies": {
+    "@servicecute/seed-core": "*"
   }
 }
