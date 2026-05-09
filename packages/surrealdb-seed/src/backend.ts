@@ -16,15 +16,22 @@ import { SurrealTracking } from "./tracking.js";
 /**
  * Recursively convert `"table:key"` strings to `RecordId` objects so
  * SurrealDB `record<table>` fields accept the value without coercion errors.
- * Only converts strings that match the `word:non-empty` pattern.
+ * Only converts strings where the table part looks like a real table name
+ * (short, not all-hex, matches identifier pattern).
  */
 function deepConvertRecordIds(value: unknown): unknown {
   if (typeof value === "string") {
     const colon = value.indexOf(":");
     if (colon > 0 && colon < value.length - 1) {
       const table = value.slice(0, colon);
-      const id = value.slice(colon + 1);
-      if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(table)) {
+      // Only convert if table looks like a real table name:
+      // - valid identifier characters
+      // - not all-hex (which would be a hash/uuid fragment)
+      // - reasonably short (table names are typically < 40 chars)
+      const isIdentifier = /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(table);
+      const isAllHex = /^[0-9a-f]+$/i.test(table);
+      if (isIdentifier && !isAllHex && table.length <= 40) {
+        const id = value.slice(colon + 1);
         return new RecordId(table, id);
       }
     }
