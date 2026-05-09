@@ -75,6 +75,98 @@ export function emitterFor(format: OutputFormat): EventEmitter {
 }
 
 /**
+ * Parse `process.argv.slice(2)` (or a supplied argv array) into a
+ * {@link SeedCommand} and run it against the supplied runner.
+ *
+ * This is the entry-point for services that want a zero-boilerplate
+ * seed CLI — just call `dispatchArgv(runner)` from a `seed.ts` script:
+ *
+ * ```ts
+ * #!/usr/bin/env bun
+ * import { SeedRunner } from '@servicecute/seed-core';
+ * import { SurrealBackend } from '@servicecute/surrealdb-seed';
+ * import { buildSeedConfig } from '@/seed/registry';
+ * import { dispatchArgv } from '@servicecute/seed-core';
+ * import { db } from '@/services/database';
+ *
+ * await db.connect();
+ * const config = await buildSeedConfig(process.env.SEED_SCOPE ?? 'development', process.argv.join(' '));
+ * const runner = new SeedRunner(config);
+ * process.exit(await dispatchArgv(runner));
+ * ```
+ *
+ * Supported verbs: apply, reset, status, list, validate, prune,
+ * force-unlock, export-registry.
+ */
+export async function dispatchArgv<B extends DbBackend>(
+  runner: SeedRunner<B>,
+  argv: string[] = process.argv.slice(2),
+): Promise<number> {
+  const cmd = parseArgv(argv);
+  if (!cmd) {
+    printHelp();
+    return 1;
+  }
+  return runCommand(runner, cmd);
+}
+
+function parseArgv(argv: string[]): SeedCommand | undefined {
+  const verb = argv[0];
+  const rest = argv.slice(1);
+
+  const flag = (name: string) => rest.includes(`--${name}`);
+  const opt = (name: string): string | undefined => {
+    const i = rest.indexOf(`--${name}`);
+    return i !== -1 ? rest[i + 1] : undefined;
+  };
+  const names = rest.filter(a => !a.startsWith('--'));
+  const format: OutputFormat = opt('format') === 'text' ? 'text' : 'json';
+  const scope = opt('scope');
+
+  switch (verb) {
+    case 'apply':
+      return { kind: 'apply', names, all: flag('all'), force: flag('force'), yes: flag('yes'), dryRun: flag('dry-run'), format, scope };
+    case 'reset':
+      return { kind: 'reset', names, all: flag('all'), sudo: flag('sudo'), cascade: flag('cascade'), yes: flag('yes'), dryRun: flag('dry-run'), format, scope };
+    case 'status':
+      return { kind: 'status', format, scope };
+    case 'list':
+      return { kind: 'list', format };
+    case 'validate':
+      return { kind: 'validate', names, format, scope };
+    case 'prune':
+      return { kind: 'prune', sudo: flag('sudo'), cascade: flag('cascade'), dryRun: flag('dry-run'), yes: flag('yes'), format, scope };
+    case 'force-unlock': {
+      const verbArg = rest.find(a => !a.startsWith('--')) ?? 'apply';
+      return { kind: 'forceUnlock', verb: verbArg === 'regenerate' ? 'regenerate' : 'apply', scope };
+    }
+    case 'export-registry':
+      return { kind: 'exportRegistry' };
+    default:
+      return undefined;
+  }
+}
+
+function printHelp(): void {
+  process.stderr.write(`Usage: seed <verb> [options]
+
+Verbs:
+  apply [names...] [--all] [--force] [--yes] [--dry-run] [--scope <s>]
+  reset [names...] [--all] [--sudo] [--cascade] [--yes] [--dry-run] [--scope <s>]
+  status [--scope <s>]
+  list
+  validate [names...] [--scope <s>]
+  prune [--sudo] [--cascade] [--dry-run] [--yes] [--scope <s>]
+  force-unlock [apply|regenerate] [--scope <s>]
+  export-registry
+
+Options:
+  --format json|text   Output format (default: json)
+  --scope <name>       Override scope for this call
+`);
+}
+
+/**
  * Run a parsed {@link SeedCommand} against a runner. Returns the exit
  * code the host binary should pass to `process.exit` (§11.3).
  *
