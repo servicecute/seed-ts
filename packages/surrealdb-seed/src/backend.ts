@@ -30,8 +30,9 @@ function deepConvertRecordIds(value: unknown): unknown {
       // - reasonably short (table names are typically < 40 chars)
       const isIdentifier = /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(table);
       const isAllHex = /^[0-9a-f]+$/i.test(table);
-      if (isIdentifier && !isAllHex && table.length <= 40) {
-        const id = value.slice(colon + 1);
+      const id = value.slice(colon + 1);
+      const isUrl = id.startsWith("//"); // https://... http://...
+      if (isIdentifier && !isAllHex && !isUrl && table.length <= 40) {
         return new RecordId(table, id);
       }
     }
