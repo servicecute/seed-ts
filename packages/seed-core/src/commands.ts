@@ -110,6 +110,9 @@ export async function dispatchArgv<B extends DbBackend>(
   return runCommand(runner, cmd);
 }
 
+/** Exported for unit testing only. */
+export const parseArgvForTest = parseArgv;
+
 function parseArgv(argv: string[]): SeedCommand | undefined {
   const verb = argv[0];
   const rest = argv.slice(1);
