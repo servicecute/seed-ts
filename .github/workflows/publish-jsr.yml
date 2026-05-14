@@ -1,0 +1,22 @@
+name: Publish JSR Packages
+
+on:
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - packages/seed-core
+          - packages/surrealdb-seed
+          - packages/firestore-seed
+    steps:
+      - uses: actions/checkout@v6
+      - run: npx jsr publish
+        working-directory: ${{ matrix.package }}

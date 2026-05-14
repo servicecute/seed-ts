@@ -6,7 +6,7 @@ TypeScript implementation of the seed-spec
 trackable side-by-side. Sibling reference: `rust-workspace/lib-seed-core/tasks.md`.
 
 ## Metadata
-- **Last updated**: 2026-05-05
+- **Last updated**: 2026-05-14
 - **Active milestone**: v0.4.3 conformant — scope routing (§9.3), backend self-reported scope (§9.4), per-call scope override + --scope CLI flag (§9.5/§11.2) all landed
 - **Spec version**: 0.4.3
 - **Bun version**: ≥ 1.1
@@ -176,6 +176,7 @@ T-IDENTITY-PARITY-1..4 — when those land:
 
 ## Completed
 
+- [x] `T18.1` Add JSR package configuration and publish verification for all workspace packages. *(completed 2026-05-14)*
 - [x] `T11.4` Initial commit + new GitHub repo — scaffolding only. *(2026-05-04)*
 
 ## Agent Execution Board
@@ -195,6 +196,7 @@ T-IDENTITY-PARITY-1..4 — when those land:
 | T10.1–T10.5 | P1 | claude | 2026-05-04 | T2, T4 | completed (T10.2/T10.3 require DB infra to actually run) |
 | T11.1 | P1 | claude | 2026-05-04 | T1–T9 | completed |
 | spec §9.3–§9.5 + §11.2 (scope routing, cross-check, per-call scope, --scope flag) | P0 | claude | 2026-05-05 | T10 | completed |
+| T18.1 | P2 | codex | 2026-05-14 | T1–T10 | completed |
 
 ## History
 

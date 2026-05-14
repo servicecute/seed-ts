@@ -8,7 +8,15 @@
   "scripts": {
     "typecheck": "bun --bun tsc -b --noEmit",
     "test": "bun test",
-    "build": "bun run --filter '*' build"
+    "build": "bun run --filter '*' build",
+    "publish:jsr:dry-run": "bun run publish:jsr:dry-run:seed-core && bun run publish:jsr:dry-run:surrealdb-seed && bun run publish:jsr:dry-run:firestore-seed",
+    "publish:jsr:dry-run:seed-core": "cd packages/seed-core && bunx jsr publish --dry-run --allow-dirty",
+    "publish:jsr:dry-run:surrealdb-seed": "cd packages/surrealdb-seed && bunx jsr publish --dry-run --allow-dirty",
+    "publish:jsr:dry-run:firestore-seed": "cd packages/firestore-seed && bunx jsr publish --dry-run --allow-dirty",
+    "publish:jsr": "bun run publish:jsr:seed-core && bun run publish:jsr:surrealdb-seed && bun run publish:jsr:firestore-seed",
+    "publish:jsr:seed-core": "cd packages/seed-core && bunx jsr publish",
+    "publish:jsr:surrealdb-seed": "cd packages/surrealdb-seed && bunx jsr publish",
+    "publish:jsr:firestore-seed": "cd packages/firestore-seed && bunx jsr publish"
   },
   "devDependencies": {
     "typescript": "^5.6.3",
