@@ -18,5 +18,6 @@ jobs:
           - packages/firestore-seed
     steps:
       - uses: actions/checkout@v6
+      - run: npm install
       - run: npx jsr publish
         working-directory: ${{ matrix.package }}
